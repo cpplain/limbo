@@ -6,6 +6,28 @@ This directory contains analysis and planning documents for implementing lazy re
 
 - **analysis.md** - Detailed analysis of the current implementation, SQLite's approach, and why PR #250 failed
 - **implementation-plan.md** - Step-by-step plan for implementing lazy parsing in Limbo
+- **baseline-results.md** - Performance measurements before implementing lazy parsing
+- **implementation-summary.md** - Summary of the implementation work completed
+- **critical-insights.md** - Key insights and lessons learned from the analysis
+
+## Implementation Status
+
+### ✅ Completed
+- Core lazy parsing infrastructure added to `BTreeCursor`
+- Incremental header parsing functions implemented
+- Sequential access optimization for SELECT * queries
+- Feature flag `LAZY_PARSING_ENABLED` for safe rollout
+- Integration with Column opcode
+- Basic unit tests passing
+
+### 🚧 In Progress
+- Updating all `read_record` calls throughout codebase
+- Performance benchmarking with lazy parsing enabled
+
+### 📋 TODO
+- Comprehensive integration tests
+- Handle index cells and overflow pages
+- Final performance validation
 
 ## Quick Summary
 

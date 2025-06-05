@@ -1135,6 +1135,70 @@ pub fn read_record(payload: &[u8], reuse_immutable: &mut ImmutableRecord) -> Res
     Ok(())
 }
 
+/// Read only the header size from a record payload (for lazy parsing)
+pub fn read_record_header_size(payload: &[u8]) -> Result<(usize, usize)> {
+    let (header_size, offset) = read_varint(payload)?;
+    Ok((header_size as usize, offset))
+}
+
+/// Parse column metadata up to a specific column index
+pub fn parse_columns_up_to(
+    payload: &[u8],
+    target_column: usize,
+    current_parsed: usize,
+    current_offset: usize,
+    header_size: usize,
+    column_types: &mut Vec<SerialType>,
+    column_offsets: &mut Vec<usize>,
+) -> Result<(usize, usize)> {
+    let mut pos = current_offset;
+    let mut parsed_count = current_parsed;
+    let mut data_offset = header_size; // Start of data after header
+    
+    // If we have some columns already parsed, calculate the current data offset
+    if parsed_count > 0 && parsed_count <= column_offsets.len() {
+        data_offset = column_offsets[parsed_count - 1];
+        if parsed_count <= column_types.len() {
+            let last_type = column_types[parsed_count - 1];
+            data_offset += last_type.size();
+        }
+    }
+    
+    // Parse headers up to target column
+    while parsed_count <= target_column && pos < header_size {
+        let (serial_type, nr) = read_varint(&payload[pos..])?;
+        validate_serial_type(serial_type)?;
+        
+        let serial_type: SerialType = serial_type.try_into()?;
+        column_types.push(serial_type);
+        column_offsets.push(data_offset);
+        
+        data_offset += serial_type.size();
+        pos += nr;
+        parsed_count += 1;
+    }
+    
+    Ok((parsed_count, pos))
+}
+
+/// Get a specific column value using lazy parsing
+pub fn get_column_value_lazy(
+    payload: &[u8],
+    column_idx: usize,
+    column_types: &[SerialType],
+    column_offsets: &[usize],
+) -> Result<RefValue> {
+    if column_idx >= column_types.len() || column_idx >= column_offsets.len() {
+        return Ok(RefValue::Null);
+    }
+    
+    let serial_type = column_types[column_idx];
+    let offset = column_offsets[column_idx];
+    
+    let (value, _) = read_value(&payload[offset..], serial_type)?;
+    Ok(value)
+}
+
 /// Reads a value that might reference the buffer it is reading from. Be sure to store RefValue with the buffer
 /// always.
 #[inline(always)]
@@ -1851,5 +1915,66 @@ mod tests {
         });
 
         assert_eq!(small_vec.get(8), None);
+    }
+
+    #[test]
+    fn test_lazy_parsing_basic() {
+        // Create a simple record with 3 columns: INTEGER(1), TEXT("hello"), INTEGER(1)
+        // Record format: header_size | serial_type1 | serial_type2 | serial_type3 | value1 | value2 | value3
+        let mut payload = Vec::new();
+        
+        // Header size (varint) - 4 bytes (1 for header size + 3 for serial types)
+        payload.push(4); // header size
+        
+        // Serial types
+        payload.push(9); // INTEGER 1 (serial type 9 = const 1)
+        payload.push(23); // TEXT with 5 bytes (serial type = 2*5 + 13 = 23)
+        payload.push(9); // INTEGER 1 (serial type 9 = const 1)
+        
+        // Values
+        // No bytes for INTEGER(1) - encoded in serial type
+        payload.extend_from_slice(b"hello"); // 5 bytes for "hello"
+        // No bytes for INTEGER(1) - encoded in serial type
+        
+        // Test header parsing
+        let (header_size, offset) = read_record_header_size(&payload).unwrap();
+        assert_eq!(header_size, 4);
+        assert_eq!(offset, 1);
+        
+        // Test incremental column parsing
+        let mut column_types = Vec::new();
+        let mut column_offsets = Vec::new();
+        
+        let (parsed_count, _new_offset) = parse_columns_up_to(
+            &payload,
+            2, // Parse up to column 2
+            0, // Starting from 0 columns parsed
+            offset,
+            header_size,
+            &mut column_types,
+            &mut column_offsets,
+        ).unwrap();
+        
+        assert_eq!(parsed_count, 3);
+        assert_eq!(column_types.len(), 3);
+        assert_eq!(column_offsets.len(), 3);
+        
+        // Verify column offsets
+        assert_eq!(column_offsets[0], 4); // First value at offset 4 (after header)
+        assert_eq!(column_offsets[1], 4); // Second value also at 4 (first value has 0 bytes)
+        assert_eq!(column_offsets[2], 9); // Third value at 9 (after "hello")
+        
+        // Test value extraction
+        let val0 = get_column_value_lazy(&payload, 0, &column_types, &column_offsets).unwrap();
+        assert_eq!(val0, RefValue::Integer(1));
+        
+        let val1 = get_column_value_lazy(&payload, 1, &column_types, &column_offsets).unwrap();
+        match val1 {
+            RefValue::Text(text) => assert_eq!(text.as_str(), "hello"),
+            _ => panic!("Expected text value"),
+        }
+        
+        let val2 = get_column_value_lazy(&payload, 2, &column_types, &column_offsets).unwrap();
+        assert_eq!(val2, RefValue::Integer(1));
     }
 }

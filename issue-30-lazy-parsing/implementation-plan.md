@@ -2,13 +2,24 @@
 
 ## Current Status
 
-**Phase 1: Benchmarking Infrastructure** ✅ **COMPLETED** (Dec 2024)
+**Phase 1: Benchmarking Infrastructure** ✅ **COMPLETED**
 - Created comprehensive benchmarks with wide tables (10-200 columns)
 - Captured baseline measurements
 - Key finding: 62-64% of time is wasted parsing unused columns
-- Ready to proceed with implementation
 
-**Next Step**: Begin Phase 2 - Basic Lazy Parsing Implementation
+**Phase 2: Basic Lazy Parsing Implementation** ✅ **COMPLETED**
+- Added lazy parsing state to BTreeCursor
+- Implemented core parsing functions
+- Created feature flag for safe rollout
+- Integrated with Column opcode
+- Added sequential access optimization
+
+**Phase 3: Full Integration** 🚧 **IN PROGRESS**
+- Updating remaining read_record calls
+- Running performance validation
+- Adding comprehensive tests
+
+**Next Step**: Complete integration and performance validation
 
 ## Overview
 Implement SQLite-style lazy record parsing to improve performance for queries that don't access all columns.
@@ -24,57 +35,64 @@ Implement SQLite-style lazy record parsing to improve performance for queries th
   - Values - cached selectively based on size and access patterns
 - **Persistent parsing state**: Maintain state across multiple Column operations on same cursor position
 
-### 2. Modified Data Structures
+### 2. Modified Data Structures (UPDATED APPROACH)
+
+After deeper analysis, we're following SQLite's design more closely by storing parsing state in the cursor rather than the record:
 
 ```rust
-// core/types.rs
-pub struct ImmutableRecord {
-    payload: Vec<u8>,
-    
-    // Lazy parsing state
-    header_size: usize,              // Total header size in bytes
-    parsed_up_to: usize,             // Number of columns parsed so far
-    header_offset: usize,            // Current position in header
-    serial_types: Vec<SerialType>,   // Serial types (parsed incrementally)
-    column_offsets: Vec<usize>,      // Byte offsets to each column
-    
-    // Cached values (None = not yet parsed)
-    values: Vec<Option<RefValue>>,
-    
-    // Performance optimization
-    last_accessed_column: Option<usize>, // For sequential access detection
-    is_sequential_access: bool,          // Optimize for SELECT *
-    
-    recreating: bool,
-}
-
-// core/storage/btree.rs - Add to BTreeCursor
+// core/storage/btree.rs - Add parsing state to BTreeCursor
 pub struct BTreeCursor {
     // ... existing fields ...
     
-    // Parsing state validity
-    parsing_state_valid: bool,  // Reset on cursor movement
+    // Lazy parsing state (similar to SQLite's VdbeCursor)
+    parsing_cache_valid: bool,           // Reset on cursor movement
+    n_hdr_parsed: usize,                 // Number of header fields parsed
+    hdr_offset: usize,                   // Offset to next unparsed byte
+    column_types: Vec<SerialType>,       // Cached serial types
+    column_offsets: Vec<usize>,          // Cached column offsets
+    cached_values: Vec<Option<RefValue>>, // Cached parsed values
+    
+    // Sequential access optimization
+    last_accessed_column: Option<usize>,
+    is_sequential_access: bool,
+}
+
+// core/types.rs - ImmutableRecord remains mostly unchanged
+pub struct ImmutableRecord {
+    payload: Vec<u8>,
+    pub values: Vec<RefValue>,  // Keep for backward compatibility
+    recreating: bool,
 }
 ```
+
+This approach has several advantages:
+1. **Cleaner separation**: Parsing state belongs with cursor position
+2. **Easier invalidation**: State clearly tied to cursor movement
+3. **Follows SQLite**: Matches proven architecture
+4. **Backward compatible**: Existing code paths remain functional
 
 ### 3. Implementation Strategy
 
 #### Phase 1: Core Infrastructure
-1. Modify `ImmutableRecord` to support lazy parsing
-2. Split `read_record()` into:
-   - `read_record_header()` - parse header size only
-   - `parse_column_metadata()` - parse serial types/offsets up to column N
-   - `parse_column_value()` - deserialize specific column value
+1. Add lazy parsing state fields to `BTreeCursor`
+2. Create feature flag `LAZY_PARSING_ENABLED` for gradual rollout
+3. Implement new parsing functions:
+   - `read_record_header_lazy()` - parse only header size
+   - `parse_columns_up_to()` - parse serial types/offsets incrementally
+   - `get_column_value_lazy()` - deserialize specific column value
 
 #### Phase 2: Column Opcode
-1. Update Column opcode to call parsing functions on-demand
-2. Implement caching for parsed values
-3. Add sequential access optimization
+1. Update Column opcode to check feature flag
+2. When lazy parsing enabled:
+   - Check if parsing cache is valid
+   - Parse columns incrementally as needed
+   - Implement sequential access detection
+3. Keep existing eager path for backward compatibility
 
 #### Phase 3: Index Handling
-1. Identify which columns are needed for index comparisons
-2. Parse only those columns when needed
-3. Refactor comparison functions to work with lazy records
+1. For index cells, eagerly parse key columns
+2. Maintain compatibility with existing comparison logic
+3. Invalidate parsing cache on cursor movement
 
 ## Implementation Steps
 

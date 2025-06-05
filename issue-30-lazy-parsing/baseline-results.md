@@ -4,8 +4,13 @@ These are the baseline performance measurements for Limbo before implementing la
 
 ## 10 Column Table Results
 
-- **SELECT * (all columns)**: 17.9 µs
-- **SELECT first 3 columns**: 10.7 µs
+- **SELECT * (all columns)**: 17.9 µs (Limbo) / 22.1 µs (SQLite)
+- **SELECT first 3 columns**: 10.7 µs (Limbo) / 10.7 µs (SQLite)
+
+## 50 Column Table Results (from additional benchmarks)
+
+- **SELECT * (all columns)**: 192.9 µs (Limbo) / 184.4 µs (SQLite)
+- **SELECT first 3 columns**: 128.6 µs (Limbo) / Not captured (SQLite)
 
 ## 100 Column Table Results
 
