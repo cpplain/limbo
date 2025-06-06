@@ -15,11 +15,11 @@
 - Added sequential access optimization
 
 **Phase 3: Full Integration** 🚧 **IN PROGRESS**
-- Updating remaining read_record calls
-- Running performance validation
-- Adding comprehensive tests
+- Core integration complete (Column opcode updated)
+- Feature flag currently disabled for safety
+- Ready for incremental rollout
 
-**Next Step**: Complete integration and performance validation
+**Next Steps**: Enable feature flag and validate through focused commits
 
 ## Overview
 Implement SQLite-style lazy record parsing to improve performance for queries that don't access all columns.
@@ -330,3 +330,37 @@ impl BTreeCursor {
 5. **Polish and Optimization**
    - Profile and optimize hot paths
    - Handle edge cases discovered in testing
+
+## Commit Strategy (Updated)
+
+To maintain clean, atomic commits, the remaining work will be split into focused changes:
+
+### Commit 1: Enable lazy parsing and validate
+- Set `LAZY_PARSING_ENABLED = true`
+- Run full test suite to ensure correctness
+- Fix any issues that arise
+- **Goal**: Prove the implementation works correctly
+
+### Commit 2: Add lazy parsing tests
+- Add integration tests for lazy parsing edge cases
+- Test overflow pages, corrupt headers, etc.
+- Test sequential access optimization
+- **Goal**: Comprehensive test coverage
+
+### Commit 3: Performance benchmarks
+- Run benchmarks with lazy parsing enabled
+- Document results in `issue-30-lazy-parsing/benchmark-results.md`
+- Compare against baseline
+- **Goal**: Validate performance improvements
+
+### Commit 4: Optimize index comparisons (if needed)
+- Update `op_idx_ge`, `op_idx_gt`, `op_idx_le`, `op_idx_lt`
+- Only parse columns needed for comparison
+- **Goal**: Extend lazy parsing benefits to index operations
+
+### Commit 5: Documentation
+- Update architecture docs with lazy parsing design
+- Add notes to CONTRIBUTING.md if needed
+- **Goal**: Ensure maintainability
+
+Each commit should be independently reviewable and testable.

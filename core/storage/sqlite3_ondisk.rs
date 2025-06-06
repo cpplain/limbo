@@ -1156,9 +1156,10 @@ pub fn parse_columns_up_to(
     let mut data_offset = header_size; // Start of data after header
     
     // If we have some columns already parsed, calculate the current data offset
-    if parsed_count > 0 && parsed_count <= column_offsets.len() {
-        data_offset = column_offsets[parsed_count - 1];
-        if parsed_count <= column_types.len() {
+    if parsed_count > 0 {
+        // Check if we're within bounds
+        if parsed_count - 1 < column_offsets.len() && parsed_count - 1 < column_types.len() {
+            data_offset = column_offsets[parsed_count - 1];
             let last_type = column_types[parsed_count - 1];
             data_offset += last_type.size();
         }
@@ -1825,6 +1826,70 @@ mod tests {
     }
 
     #[test]
+    fn test_lazy_parsing_detailed() {
+        // Create a simple record: header_size=4, 3 columns (int 1, text "hi", null)
+        let mut payload = Vec::new();
+        
+        // Header size varint (4 bytes)
+        payload.push(4);
+        
+        // Serial types: 1 (int8), 17 (text len 2), 0 (null)
+        payload.push(1);  // int8
+        payload.push(17); // text len 2: 13 + (2 * 2) = 17
+        payload.push(0);  // null
+        
+        // Data
+        payload.push(1);  // integer value 1
+        payload.extend_from_slice(b"hi"); // text value "hi"
+        
+        // Test parsing header
+        let (header_size, offset) = read_record_header_size(&payload).unwrap();
+        assert_eq!(header_size, 4);
+        assert_eq!(offset, 1);
+        
+        // Test incremental parsing
+        let mut column_types = Vec::new();
+        let mut column_offsets = Vec::new();
+        
+        let (parsed_count, _new_offset) = parse_columns_up_to(
+            &payload,
+            2, // parse up to column 2
+            0, // starting from 0
+            offset,
+            header_size,
+            &mut column_types,
+            &mut column_offsets,
+        ).unwrap();
+        
+        assert_eq!(parsed_count, 3); // Should parse all 3 columns
+        assert_eq!(column_types.len(), 3);
+        assert_eq!(column_offsets.len(), 3);
+        
+        // Verify column types
+        assert_eq!(column_types[0], SerialType::i8());
+        assert_eq!(column_types[1], SerialType::text(2));
+        assert_eq!(column_types[2], SerialType::null());
+        
+        // Verify offsets
+        assert_eq!(column_offsets[0], 4); // After header
+        assert_eq!(column_offsets[1], 5); // After int8
+        assert_eq!(column_offsets[2], 7); // After text
+        
+        // Test getting column values
+        let val0 = get_column_value_lazy(&payload, 0, &column_types, &column_offsets).unwrap();
+        assert_eq!(val0, RefValue::Integer(1));
+        
+        let val1 = get_column_value_lazy(&payload, 1, &column_types, &column_offsets).unwrap();
+        match val1 {
+            RefValue::Text(t) => assert_eq!(t.value.to_slice(), b"hi"),
+            _ => panic!("Expected text value"),
+        }
+        
+        let val2 = get_column_value_lazy(&payload, 2, &column_types, &column_offsets).unwrap();
+        assert_eq!(val2, RefValue::Null);
+    }
+
+    #[test]
     fn test_serial_type_helpers() {
         assert_eq!(
             TryInto::<SerialType>::try_into(12u64).unwrap(),
@@ -1976,5 +2041,64 @@ mod tests {
         
         let val2 = get_column_value_lazy(&payload, 2, &column_types, &column_offsets).unwrap();
         assert_eq!(val2, RefValue::Integer(1));
+    }
+
+    #[test]
+    fn test_lazy_parsing_incremental() {
+        // Test parsing columns incrementally (one at a time)
+        let mut payload = Vec::new();
+        payload.push(5); // header size
+        payload.push(6); // INTEGER (8 bytes) - SerialType 6 = I64 
+        payload.push(2); // INTEGER (16 bit)
+        payload.push(3); // INTEGER (24 bit)
+        payload.push(0); // NULL (serial type 0)
+        
+        // Values
+        payload.extend_from_slice(&[0xFF; 8]); // 8-byte integer
+        payload.extend_from_slice(&[0xAB, 0xCD]); // 2-byte integer
+        payload.extend_from_slice(&[0x12, 0x34, 0x56]); // 3-byte integer
+        // NULL has no data
+        
+        let (header_size, offset) = read_record_header_size(&payload).unwrap();
+        assert_eq!(header_size, 5);
+        
+        let mut column_types = Vec::new();
+        let mut column_offsets = Vec::new();
+        
+        // Parse column 0
+        let (parsed_count, new_offset) = parse_columns_up_to(
+            &payload, 0, 0, offset, header_size, &mut column_types, &mut column_offsets
+        ).unwrap();
+        assert_eq!(parsed_count, 1);
+        
+        // Parse column 1
+        let (parsed_count, new_offset) = parse_columns_up_to(
+            &payload, 1, parsed_count, new_offset, header_size, &mut column_types, &mut column_offsets
+        ).unwrap();
+        assert_eq!(parsed_count, 2);
+        
+        
+        // Parse remaining columns
+        let (parsed_count, _) = parse_columns_up_to(
+            &payload, 3, parsed_count, new_offset, header_size, &mut column_types, &mut column_offsets
+        ).unwrap();
+        assert_eq!(parsed_count, 4);
+        
+        // Verify offsets
+        assert_eq!(column_offsets[0], 5); // After header
+        assert_eq!(column_offsets[1], 5 + 8); // After 8-byte int
+        assert_eq!(column_offsets[2], 5 + 8 + 2); // After 2-byte int  
+        assert_eq!(column_offsets[3], 5 + 8 + 2 + 3); // After 3-byte int
+        
+        // Test NULL value (column 3 has serial type 0 = NULL)
+        let val3 = get_column_value_lazy(&payload, 3, &column_types, &column_offsets).unwrap();
+        assert_eq!(val3, RefValue::Null);
+        
+        // Also test the integer values to ensure they're parsed correctly
+        let val0 = get_column_value_lazy(&payload, 0, &column_types, &column_offsets).unwrap();
+        assert_eq!(val0, RefValue::Integer(-1)); // 0xFF... as signed integer
+        
+        let val1 = get_column_value_lazy(&payload, 1, &column_types, &column_offsets).unwrap();
+        assert_eq!(val1, RefValue::Integer(-21555)); // 0xABCD as signed 16-bit
     }
 }

@@ -850,10 +850,8 @@ impl BTreeCursor {
                     if let Some(next_page) = first_overflow_page {
                         return_if_io!(self.process_overflow_read(_payload, next_page, payload_size))
                     } else {
-                        crate::storage::sqlite3_ondisk::read_record(
-                            _payload,
-                            self.get_immutable_record_or_create().as_mut().unwrap(),
-                        )?
+                        self.invalidate_parsing_cache();
+                        self.read_record_with_lazy_support(_payload)?
                     };
                     self.stack.retreat();
                     return Ok(CursorResult::Ok(CursorHasRecord::Yes {
@@ -1656,6 +1654,7 @@ impl BTreeCursor {
     /// Move the cursor to the root page of the btree.
     #[instrument(skip_all, level = Level::TRACE)]
     fn move_to_root(&mut self) {
+        self.invalidate_parsing_cache();
         tracing::trace!("move_to_root({})", self.root_page);
         let mem_page = self.read_page(self.root_page).unwrap();
         self.stack.clear();
@@ -1664,6 +1663,7 @@ impl BTreeCursor {
 
     /// Move the cursor to the rightmost record in the btree.
     fn move_to_rightmost(&mut self) -> Result<CursorResult<()>> {
+        self.invalidate_parsing_cache();
         self.move_to_root();
 
         loop {
@@ -4224,6 +4224,7 @@ impl BTreeCursor {
     }
 
     pub fn seek_to_last(&mut self) -> Result<CursorResult<()>> {
+        self.invalidate_parsing_cache();
         return_if_io!(self.move_to_rightmost());
         let cursor_has_record = return_if_io!(self.get_next_record(None));
         if cursor_has_record == CursorHasRecord::No {
@@ -4244,6 +4245,7 @@ impl BTreeCursor {
     }
 
     pub fn rewind(&mut self) -> Result<CursorResult<()>> {
+        self.invalidate_parsing_cache();
         if self.mv_cursor.is_some() {
             let cursor_has_record = return_if_io!(self.get_next_record(None));
             self.has_record.replace(cursor_has_record);
@@ -4258,6 +4260,7 @@ impl BTreeCursor {
 
     pub fn last(&mut self) -> Result<CursorResult<()>> {
         assert!(self.mv_cursor.is_none());
+        self.invalidate_parsing_cache();
         match self.move_to_rightmost()? {
             CursorResult::Ok(_) => self.prev(),
             CursorResult::IO => Ok(CursorResult::IO),
@@ -4265,6 +4268,7 @@ impl BTreeCursor {
     }
 
     pub fn next(&mut self) -> Result<CursorResult<()>> {
+        self.invalidate_parsing_cache();
         let _ = return_if_io!(self.restore_context());
         let cursor_has_record = return_if_io!(self.get_next_record(None));
         self.has_record.replace(cursor_has_record);
@@ -4273,6 +4277,7 @@ impl BTreeCursor {
 
     pub fn prev(&mut self) -> Result<CursorResult<()>> {
         assert!(self.mv_cursor.is_none());
+        self.invalidate_parsing_cache();
         let _ = return_if_io!(self.restore_context());
         match self.get_prev_record(None)? {
             CursorResult::Ok(cursor_has_record) => {
@@ -4296,6 +4301,7 @@ impl BTreeCursor {
 
     pub fn seek(&mut self, key: SeekKey<'_>, op: SeekOp) -> Result<CursorResult<bool>> {
         assert!(self.mv_cursor.is_none());
+        self.invalidate_parsing_cache();
         // We need to clear the null flag for the table cursor before seeking,
         // because it might have been set to false by an unmatched left-join row during the previous iteration
         // on the outer loop.
@@ -5060,6 +5066,7 @@ impl BTreeCursor {
         dest_offset: usize,
         new_payload: &[u8],
     ) -> Result<CursorResult<()>> {
+        self.invalidate_parsing_cache();
         return_if_locked!(page_ref.get());
         let page_ref = page_ref.get();
         let buf = page_ref.get().contents.as_mut().unwrap().as_ptr();
@@ -5128,23 +5135,25 @@ impl BTreeCursor {
 
     /// Get a column value using lazy parsing
     pub fn get_column_lazy(&mut self, column_idx: usize) -> Result<RefValue> {
-        // Check if we have the record payload
-        let record = self.get_immutable_record();
-        if record.is_none() {
-            return Ok(RefValue::Null);
-        }
-        let payload = record.as_ref().unwrap().get_payload().to_vec();
-        drop(record); // Release the borrow
-        
         // Detect sequential access pattern
         if let Some(last) = self.last_accessed_column {
             if column_idx == last + 1 {
                 self.is_sequential_access = true;
             } else if column_idx < last {
                 self.is_sequential_access = false;
+            } else if column_idx > last + 1 {
+                // Jumping forward but not sequential
+                self.is_sequential_access = false;
             }
         }
         self.last_accessed_column = Some(column_idx);
+        
+        // Check if we have a cached value first
+        if column_idx < self.cached_values.len() {
+            if let Some(ref value) = self.cached_values[column_idx] {
+                return Ok(value.clone());
+            }
+        }
         
         // Parse columns up to the requested one (or more if sequential)
         let parse_up_to = if self.is_sequential_access {
@@ -5154,9 +5163,22 @@ impl BTreeCursor {
             column_idx
         };
         
+        // We need to parse more columns - check if we have a record
+        let has_record = self.get_immutable_record().is_some();
+        if !has_record {
+            return Ok(RefValue::Null);
+        }
+        
+        // Parse metadata if needed
         if self.n_hdr_parsed <= parse_up_to {
+            // Get payload temporarily to parse headers
+            let payload_copy = {
+                let record = self.get_immutable_record();
+                record.as_ref().unwrap().get_payload().to_vec()
+            };
+            
             let (parsed_count, new_offset) = crate::storage::sqlite3_ondisk::parse_columns_up_to(
-                &payload,
+                &payload_copy,
                 parse_up_to,
                 self.n_hdr_parsed,
                 self.hdr_offset,
@@ -5173,20 +5195,17 @@ impl BTreeCursor {
             }
         }
         
-        // Check if we have a cached value
-        if column_idx < self.cached_values.len() {
-            if let Some(ref value) = self.cached_values[column_idx] {
-                return Ok(value.clone());
-            }
-        }
-        
         // Parse the actual value
-        let value = crate::storage::sqlite3_ondisk::get_column_value_lazy(
-            &payload,
-            column_idx,
-            &self.column_types,
-            &self.column_offsets,
-        )?;
+        let value = {
+            let record = self.get_immutable_record();
+            let payload = record.as_ref().unwrap().get_payload();
+            crate::storage::sqlite3_ondisk::get_column_value_lazy(
+                payload,
+                column_idx,
+                &self.column_types,
+                &self.column_offsets,
+            )?
+        };
         
         // Cache small values (integers, floats, small text/blob)
         let should_cache = match &value {
