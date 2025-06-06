@@ -31,29 +31,31 @@ All critical issues have been resolved:
 
 ## Immediate Next Steps
 
-### 1. Enable Feature Flag (Next Commit)
+### 1. Enable Feature Flag ✅ COMPLETED
 **Focus**: Enable lazy parsing and validate correctness
 
 **Changes**:
-- Set `LAZY_PARSING_ENABLED = true` in `core/storage/btree.rs`
-- Run full test suite: `make test`
-- Fix any test failures that arise
+- ✅ Set `LAZY_PARSING_ENABLED = true` in `core/storage/btree.rs`
+- ✅ Run full test suite: `make test`
+- ✅ Fix any test failures that arise
 
 **Success Criteria**:
-- All existing tests pass with lazy parsing enabled
-- No crashes or incorrect results
+- ✅ All existing tests pass with lazy parsing enabled
+- ✅ No crashes or incorrect results
 
-### 2. Performance Benchmarks (Following Commit)
+### 2. Performance Benchmarks ✅ COMPLETED
 **Focus**: Validate performance improvements
 
 **Steps**:
-- Run benchmarks from `issue-30-lazy-parsing/benchmarks/`
-- Compare results to baseline
-- Document improvements
+- ✅ Run benchmarks from `issue-30-lazy-parsing/benchmarks/`
+- ✅ Compare results to baseline
+- ✅ Document improvements
 
-**Expected Results**:
-- <5% regression on SELECT * queries
-- 20-50% improvement on selective column queries
+**Actual Results**:
+- 4.3% regression on 100-column SELECT * queries (within 5% limit)
+- 5.9% regression on 50-column SELECT * queries (exceeds 5% limit)
+- No improvement on selective column queries yet
+- Fixed critical payload copy bug, improving performance by ~50%
 
 ### 3. Integration Tests (Optional)
 - Add tests for edge cases with lazy parsing

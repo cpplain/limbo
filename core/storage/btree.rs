@@ -41,7 +41,7 @@ use super::{
 /// Feature flag to enable lazy record parsing.
 /// When enabled, records are parsed incrementally as columns are accessed.
 /// This improves performance for queries that only access a subset of columns.
-pub static LAZY_PARSING_ENABLED: bool = false;
+pub static LAZY_PARSING_ENABLED: bool = true;
 
 /// The B-Tree page header is 12 bytes for interior pages and 8 bytes for leaf pages.
 ///
@@ -663,6 +663,10 @@ pub struct BTreeCursor {
     last_accessed_column: Option<usize>,
     /// Whether we're in sequential access mode (optimizes SELECT *)
     is_sequential_access: bool,
+    
+    // Payload cache to avoid repeated copies
+    /// Cached payload for the current record to avoid copies on every column access
+    cached_payload: Option<Vec<u8>>,
 }
 
 impl BTreeCursor {
@@ -706,6 +710,7 @@ impl BTreeCursor {
             cached_values: Vec::with_capacity(16),
             last_accessed_column: None,
             is_sequential_access: false,
+            cached_payload: None,
         }
     }
 
@@ -5098,6 +5103,7 @@ impl BTreeCursor {
         self.cached_values.clear();
         self.last_accessed_column = None;
         self.is_sequential_access = false;
+        self.cached_payload = None;
     }
 
     /// Initialize lazy parsing state for the current record
@@ -5107,6 +5113,8 @@ impl BTreeCursor {
         self.hdr_offset = offset;
         self.n_hdr_parsed = 0;
         self.parsing_cache_valid = true;
+        // Cache the payload to avoid copies on every column access
+        self.cached_payload = Some(payload.to_vec());
         Ok(())
     }
     
@@ -5171,14 +5179,18 @@ impl BTreeCursor {
         
         // Parse metadata if needed
         if self.n_hdr_parsed <= parse_up_to {
-            // Get payload temporarily to parse headers
-            let payload_copy = {
-                let record = self.get_immutable_record();
-                record.as_ref().unwrap().get_payload().to_vec()
-            };
+            // Use cached payload if available, otherwise cache it now
+            if self.cached_payload.is_none() {
+                let payload = {
+                    let record = self.get_immutable_record();
+                    record.as_ref().unwrap().get_payload().to_vec()
+                };
+                self.cached_payload = Some(payload);
+            }
             
+            let payload_ref = self.cached_payload.as_ref().unwrap();
             let (parsed_count, new_offset) = crate::storage::sqlite3_ondisk::parse_columns_up_to(
-                &payload_copy,
+                payload_ref,
                 parse_up_to,
                 self.n_hdr_parsed,
                 self.hdr_offset,

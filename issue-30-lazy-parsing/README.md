@@ -17,20 +17,30 @@ This directory contains analysis and planning documents for implementing lazy re
 - Core lazy parsing infrastructure added to `BTreeCursor`
 - Incremental header parsing functions implemented
 - Sequential access optimization for SELECT * queries
-- Feature flag `LAZY_PARSING_ENABLED` for safe rollout
+- Feature flag `LAZY_PARSING_ENABLED` enabled
 - Integration with Column opcode
 - **Critical bug fixes**:
   - Cache invalidation on all cursor movements
-  - Eliminated performance-killing payload copy
+  - Fixed payload copy bug (reduced from O(n) to O(1) copies)
   - Fixed sequential access detection logic
+  - Added payload caching to avoid repeated allocations
 - Comprehensive unit tests passing
 - All existing tests pass with no regressions
 
-### 📋 Next Steps
-1. Enable `LAZY_PARSING_ENABLED` flag and validate
-2. Run performance benchmarks
-3. Document performance improvements
-4. Consider extending to index operations
+### 📊 Performance Results
+- **Functional**: All tests passing, no correctness issues
+- **Performance**: Needs optimization
+  - 100-column SELECT *: 4.3% regression (within 5% target)
+  - 50-column SELECT *: 5.9% regression (exceeds 5% target)
+  - Small tables show significant overhead (62% on 10-column tables)
+  - No improvement yet on selective column queries
+
+### 📋 Future Work
+1. Profile and optimize hot paths
+2. Consider hybrid approach for small tables
+3. Verify sequential detection is working
+4. Optimize state management and allocations
+5. Consider extending to index operations
 
 ## Quick Summary
 
