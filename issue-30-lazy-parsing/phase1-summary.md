@@ -46,10 +46,11 @@ The implementation successfully adds projection-based parsing, but falls short o
 
 To achieve the performance targets, consider:
 
-1. **Phase 2 - SIMD Optimizations**: Implement SIMD varint decoding as planned
-2. **Profiling**: Profile the code to identify actual bottlenecks
-3. **Optimization**: Optimize the column skipping logic to reduce overhead
-4. **Heuristics**: Add heuristics to disable projection for small tables
+1. **Bitmap Optimization (Completed)**: Changed from Vec<usize> to u128 bitmap for O(1) column checks
+2. **Sparse Record Representation**: Eliminate NULL placeholders for skipped columns
+3. **Lazy Header Parsing**: Only parse serial types for needed columns
+4. **SIMD Optimizations**: Implement SIMD varint decoding as planned
+5. **Heuristics**: Add heuristics to disable projection for small tables
 
 ## Code Quality
 
@@ -57,6 +58,7 @@ To achieve the performance targets, consider:
 - Code compiles without errors ✅  
 - Backwards compatible (column_mask=None preserves original behavior) ✅
 - Clean API design ✅
+- Optimized bitmap operations (u128 instead of Vec<usize>) ✅
 
 ## Conclusion
 

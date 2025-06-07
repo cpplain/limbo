@@ -637,10 +637,10 @@ pub struct BTreeCursor {
     /// Contains the current cell_idx for `find_cell`
     find_cell_state: FindCellState,
     /// Pending column mask for selective record parsing after overflow pages are read
-    pending_column_mask: Option<Vec<usize>>,
+    pending_column_mask: Option<u128>,
     /// Column mask indicating which columns should be read from records
     /// None means read all columns, Some(mask) means read only specified columns
-    column_mask: Option<Vec<usize>>,
+    column_mask: Option<u128>,
 }
 
 impl BTreeCursor {
@@ -683,7 +683,7 @@ impl BTreeCursor {
         mv_cursor: Option<Rc<RefCell<MvCursor>>>,
         pager: Rc<Pager>,
         root_page: usize,
-        column_mask: Option<Vec<usize>>,
+        column_mask: Option<u128>,
     ) -> Self {
         let mut cursor = Self::new(mv_cursor, pager, root_page, Vec::new());
         cursor.column_mask = column_mask;
@@ -696,7 +696,7 @@ impl BTreeCursor {
         root_page: usize,
         index: &Index,
         collations: Vec<CollationSeq>,
-        column_mask: Option<Vec<usize>>,
+        column_mask: Option<u128>,
     ) -> Self {
         let mut cursor = Self::new(mv_cursor, pager, root_page, collations);
         cursor.index_key_info = Some(IndexKeyInfo::new_from_index(index));
@@ -1028,7 +1028,7 @@ impl BTreeCursor {
                 {
                     let mut reuse_immutable = self.get_immutable_record_or_create();
                     // Use the pending column mask if available
-                    if let Some(mask) = &self.pending_column_mask {
+                    if let Some(mask) = self.pending_column_mask {
                         crate::storage::sqlite3_ondisk::read_record_projected(
                             &payload,
                             reuse_immutable.as_mut().unwrap(),
@@ -2344,12 +2344,12 @@ impl BTreeCursor {
         payload_size: u64,
     ) -> Result<CursorResult<()>> {
         // Use the cursor's column_mask if available
-        let column_mask = self.column_mask.clone();
+        let column_mask = self.column_mask;
         self.read_record_w_possible_overflow_projected(
             payload,
             next_page,
             payload_size,
-            column_mask.as_deref(),
+            column_mask,
         )
     }
     
@@ -2358,13 +2358,13 @@ impl BTreeCursor {
         payload: &'static [u8],
         next_page: Option<u32>,
         payload_size: u64,
-        column_mask: Option<&[usize]>,
+        column_mask: Option<u128>,
     ) -> Result<CursorResult<()>> {
         if let Some(next_page) = next_page {
             // For overflow pages, we still need to read all data first
             // Then apply projection after the full payload is assembled
             // Store the column mask for use after overflow reading
-            self.pending_column_mask = column_mask.map(|mask| mask.to_vec());
+            self.pending_column_mask = column_mask;
             self.process_overflow_read(payload, next_page, payload_size)
         } else {
             crate::storage::sqlite3_ondisk::read_record_projected(
@@ -5266,7 +5266,7 @@ impl BTreeCursor {
     /// Read the current record with column projection.
     /// Only the columns specified in column_mask will be parsed from the payload.
     /// Other columns will be set to NULL in the record.
-    pub fn read_current_record_projected(&mut self, column_mask: Option<&[usize]>) -> Result<CursorResult<()>> {
+    pub fn read_current_record_projected(&mut self, column_mask: Option<u128>) -> Result<CursorResult<()>> {
         if !matches!(self.has_record.get(), CursorHasRecord::Yes { .. }) {
             return Ok(CursorResult::Ok(()));
         }

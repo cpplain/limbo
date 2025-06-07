@@ -1144,7 +1144,7 @@ pub fn read_record(payload: &[u8], reuse_immutable: &mut ImmutableRecord) -> Res
 pub fn read_record_projected(
     payload: &[u8], 
     reuse_immutable: &mut ImmutableRecord,
-    column_mask: Option<&[usize]>
+    column_mask: Option<u128>
 ) -> Result<()> {
     // Let's clear previous use
     reuse_immutable.invalidate();
@@ -1196,7 +1196,7 @@ pub fn read_record_projected(
         for &serial_type in &serial_types.data[..serial_types.len.min(serial_types.data.len())] {
             let serial_type: SerialType = unsafe { serial_type.assume_init().try_into()? };
             
-            if mask.contains(&column_idx) {
+            if mask & (1u128 << column_idx) != 0 {
                 // Parse this column
                 let (value, n) = read_value(&reuse_immutable.get_payload()[pos..], serial_type)?;
                 pos += n;
@@ -1215,7 +1215,7 @@ pub fn read_record_projected(
             for serial_type in extra {
                 let serial_type: SerialType = (*serial_type).try_into()?;
                 
-                if mask.contains(&column_idx) {
+                if mask & (1u128 << column_idx) != 0 {
                     // Parse this column
                     let (value, n) = read_value(
                         &reuse_immutable.get_payload()[pos..],

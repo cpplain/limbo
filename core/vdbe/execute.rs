@@ -928,20 +928,10 @@ pub fn op_open_read(
         }
         None => None,
     };
-    // Convert u128 column mask to Vec<usize> for column indices
-    let column_mask_vec = column_mask.map(|mask| {
-        let mut indices = Vec::new();
-        for i in 0..128 {
-            if mask & (1u128 << i) != 0 {
-                indices.push(i);
-            }
-        }
-        indices
-    });
     let mut cursors = state.cursors.borrow_mut();
     match cursor_type {
         CursorType::BTreeTable(_) => {
-            let cursor = BTreeCursor::new_table(mv_cursor, pager.clone(), *root_page, column_mask_vec.clone());
+            let cursor = BTreeCursor::new_table(mv_cursor, pager.clone(), *root_page, *column_mask);
             cursors
                 .get_mut(*cursor_id)
                 .unwrap()
@@ -973,7 +963,7 @@ pub fn op_open_read(
                 *root_page,
                 index.as_ref(),
                 collations,
-                column_mask_vec,
+                *column_mask,
             );
             cursors
                 .get_mut(*cursor_id)
