@@ -1363,26 +1363,18 @@ pub fn op_column(
                 let mut cursor =
                     must_be_btree_cursor!(*cursor_id, program.cursor_ref, state, "Column");
                 let cursor = cursor.as_btree_mut();
-                
-                // Check if lazy parsing is enabled and cursor has valid parsing state
-                let value = if crate::storage::btree::LAZY_PARSING_ENABLED && cursor.parsing_cache_valid {
-                    // Use lazy parsing path
-                    cursor.get_column_lazy(*column)?
-                } else {
-                    // Use existing eager parsing path
-                    let record = cursor.record();
-                    if let Some(record) = record.as_ref() {
-                        if cursor.get_null_flag() {
-                            RefValue::Null
-                        } else {
-                            match record.get_value_opt(*column) {
-                                Some(val) => val.clone(),
-                                None => RefValue::Null,
-                            }
-                        }
-                    } else {
+                let record = cursor.record();
+                let value = if let Some(record) = record.as_ref() {
+                    if cursor.get_null_flag() {
                         RefValue::Null
+                    } else {
+                        match record.get_value_opt(*column) {
+                            Some(val) => val.clone(),
+                            None => RefValue::Null,
+                        }
                     }
+                } else {
+                    RefValue::Null
                 };
                 value
             };

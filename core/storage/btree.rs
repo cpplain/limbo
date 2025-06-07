@@ -10,7 +10,7 @@ use crate::{
         },
     },
     translate::{collate::CollationSeq, plan::IterationDirection},
-    types::{IndexKeyInfo, IndexKeySortOrder, SerialType},
+    types::{IndexKeyInfo, IndexKeySortOrder},
     MvCursor,
 };
 
@@ -37,11 +37,6 @@ use super::{
         write_varint_to_vec, IndexInteriorCell, IndexLeafCell, OverflowCell, DATABASE_HEADER_SIZE,
     },
 };
-
-/// Feature flag to enable lazy record parsing.
-/// When enabled, records are parsed incrementally as columns are accessed.
-/// This improves performance for queries that only access a subset of columns.
-pub static LAZY_PARSING_ENABLED: bool = true;
 
 /// The B-Tree page header is 12 bytes for interior pages and 8 bytes for leaf pages.
 ///
@@ -641,32 +636,6 @@ pub struct BTreeCursor {
     read_overflow_state: Option<ReadPayloadOverflow>,
     /// Contains the current cell_idx for `find_cell`
     find_cell_state: FindCellState,
-    
-    // Lazy parsing state (similar to SQLite's VdbeCursor)
-    /// Whether the parsing cache is valid for the current cursor position
-    pub parsing_cache_valid: bool,
-    /// Number of column headers parsed so far
-    n_hdr_parsed: usize,
-    /// Current offset in the record header
-    hdr_offset: usize,
-    /// Total header size in bytes
-    header_size: usize,
-    /// Cached serial types for each column
-    column_types: Vec<SerialType>,
-    /// Cached byte offsets to each column's data
-    column_offsets: Vec<usize>,
-    /// Cached parsed values (None = not yet parsed)
-    cached_values: Vec<Option<RefValue>>,
-    
-    // Sequential access optimization
-    /// Last column accessed (for detecting sequential patterns)
-    last_accessed_column: Option<usize>,
-    /// Whether we're in sequential access mode (optimizes SELECT *)
-    is_sequential_access: bool,
-    
-    // Payload cache to avoid repeated copies
-    /// Cached payload for the current record to avoid copies on every column access
-    cached_payload: Option<Vec<u8>>,
 }
 
 impl BTreeCursor {
@@ -700,17 +669,6 @@ impl BTreeCursor {
             move_to_state: CursorMoveToState::Start,
             read_overflow_state: None,
             find_cell_state: FindCellState(None),
-            // Initialize lazy parsing state
-            parsing_cache_valid: false,
-            n_hdr_parsed: 0,
-            hdr_offset: 0,
-            header_size: 0,
-            column_types: Vec::with_capacity(16),
-            column_offsets: Vec::with_capacity(16),
-            cached_values: Vec::with_capacity(16),
-            last_accessed_column: None,
-            is_sequential_access: false,
-            cached_payload: None,
         }
     }
 
@@ -855,8 +813,10 @@ impl BTreeCursor {
                     if let Some(next_page) = first_overflow_page {
                         return_if_io!(self.process_overflow_read(_payload, next_page, payload_size))
                     } else {
-                        self.invalidate_parsing_cache();
-                        self.read_record_with_lazy_support(_payload)?
+                        crate::storage::sqlite3_ondisk::read_record(
+                            _payload,
+                            self.get_immutable_record_or_create().as_mut().unwrap(),
+                        )?
                     };
                     self.stack.retreat();
                     return Ok(CursorResult::Ok(CursorHasRecord::Yes {
@@ -1412,14 +1372,13 @@ impl BTreeCursor {
             match rowid {
                 Some(rowid) => {
                     let record = mv_cursor.current_row().unwrap().unwrap();
-                    let record_data = record.data.clone();
-                    let rowid_value = rowid.row_id;
+                    crate::storage::sqlite3_ondisk::read_record(
+                        &record.data,
+                        self.get_immutable_record_or_create().as_mut().unwrap(),
+                    )?;
                     mv_cursor.forward();
-                    drop(mv_cursor);
-                    self.invalidate_parsing_cache();
-                    self.read_record_with_lazy_support(&record_data)?;
                     return Ok(CursorResult::Ok(CursorHasRecord::Yes {
-                        rowid: Some(rowid_value),
+                        rowid: Some(rowid.row_id),
                     }));
                 }
                 None => return Ok(CursorResult::Ok(CursorHasRecord::No)),
@@ -1508,8 +1467,10 @@ impl BTreeCursor {
                             *payload_size
                         ))
                     } else {
-                        self.invalidate_parsing_cache();
-                        self.read_record_with_lazy_support(_payload)?
+                        crate::storage::sqlite3_ondisk::read_record(
+                            _payload,
+                            self.get_immutable_record_or_create().as_mut().unwrap(),
+                        )?
                     };
                     self.stack.advance();
                     return Ok(CursorResult::Ok(CursorHasRecord::Yes {
@@ -1659,7 +1620,6 @@ impl BTreeCursor {
     /// Move the cursor to the root page of the btree.
     #[instrument(skip_all, level = Level::TRACE)]
     fn move_to_root(&mut self) {
-        self.invalidate_parsing_cache();
         tracing::trace!("move_to_root({})", self.root_page);
         let mem_page = self.read_page(self.root_page).unwrap();
         self.stack.clear();
@@ -1668,7 +1628,6 @@ impl BTreeCursor {
 
     /// Move the cursor to the rightmost record in the btree.
     fn move_to_rightmost(&mut self) -> Result<CursorResult<()>> {
-        self.invalidate_parsing_cache();
         self.move_to_root();
 
         loop {
@@ -4229,7 +4188,6 @@ impl BTreeCursor {
     }
 
     pub fn seek_to_last(&mut self) -> Result<CursorResult<()>> {
-        self.invalidate_parsing_cache();
         return_if_io!(self.move_to_rightmost());
         let cursor_has_record = return_if_io!(self.get_next_record(None));
         if cursor_has_record == CursorHasRecord::No {
@@ -4250,7 +4208,6 @@ impl BTreeCursor {
     }
 
     pub fn rewind(&mut self) -> Result<CursorResult<()>> {
-        self.invalidate_parsing_cache();
         if self.mv_cursor.is_some() {
             let cursor_has_record = return_if_io!(self.get_next_record(None));
             self.has_record.replace(cursor_has_record);
@@ -4265,7 +4222,6 @@ impl BTreeCursor {
 
     pub fn last(&mut self) -> Result<CursorResult<()>> {
         assert!(self.mv_cursor.is_none());
-        self.invalidate_parsing_cache();
         match self.move_to_rightmost()? {
             CursorResult::Ok(_) => self.prev(),
             CursorResult::IO => Ok(CursorResult::IO),
@@ -4273,7 +4229,6 @@ impl BTreeCursor {
     }
 
     pub fn next(&mut self) -> Result<CursorResult<()>> {
-        self.invalidate_parsing_cache();
         let _ = return_if_io!(self.restore_context());
         let cursor_has_record = return_if_io!(self.get_next_record(None));
         self.has_record.replace(cursor_has_record);
@@ -4282,7 +4237,6 @@ impl BTreeCursor {
 
     pub fn prev(&mut self) -> Result<CursorResult<()>> {
         assert!(self.mv_cursor.is_none());
-        self.invalidate_parsing_cache();
         let _ = return_if_io!(self.restore_context());
         match self.get_prev_record(None)? {
             CursorResult::Ok(cursor_has_record) => {
@@ -4306,7 +4260,6 @@ impl BTreeCursor {
 
     pub fn seek(&mut self, key: SeekKey<'_>, op: SeekOp) -> Result<CursorResult<bool>> {
         assert!(self.mv_cursor.is_none());
-        self.invalidate_parsing_cache();
         // We need to clear the null flag for the table cursor before seeking,
         // because it might have been set to false by an unmatched left-join row during the previous iteration
         // on the outer loop.
@@ -5071,7 +5024,6 @@ impl BTreeCursor {
         dest_offset: usize,
         new_payload: &[u8],
     ) -> Result<CursorResult<()>> {
-        self.invalidate_parsing_cache();
         return_if_locked!(page_ref.get());
         let page_ref = page_ref.get();
         let buf = page_ref.get().contents.as_mut().unwrap().as_ptr();
@@ -5090,147 +5042,6 @@ impl BTreeCursor {
 
     fn get_immutable_record(&self) -> std::cell::RefMut<'_, Option<ImmutableRecord>> {
         self.reusable_immutable_record.borrow_mut()
-    }
-
-    /// Invalidate the lazy parsing cache when cursor moves to a new position
-    fn invalidate_parsing_cache(&mut self) {
-        self.parsing_cache_valid = false;
-        self.n_hdr_parsed = 0;
-        self.hdr_offset = 0;
-        self.header_size = 0;
-        self.column_types.clear();
-        self.column_offsets.clear();
-        self.cached_values.clear();
-        self.last_accessed_column = None;
-        self.is_sequential_access = false;
-        self.cached_payload = None;
-    }
-
-    /// Initialize lazy parsing state for the current record
-    pub fn init_lazy_parsing(&mut self, payload: &[u8]) -> Result<()> {
-        let (header_size, offset) = crate::storage::sqlite3_ondisk::read_record_header_size(payload)?;
-        self.header_size = header_size;
-        self.hdr_offset = offset;
-        self.n_hdr_parsed = 0;
-        self.parsing_cache_valid = true;
-        // Cache the payload to avoid copies on every column access
-        self.cached_payload = Some(payload.to_vec());
-        Ok(())
-    }
-    
-    /// Read a record with lazy parsing support
-    fn read_record_with_lazy_support(&mut self, payload: &[u8]) -> Result<()> {
-        if LAZY_PARSING_ENABLED {
-            // Store the payload in the immutable record for later access
-            let mut record = self.get_immutable_record_or_create();
-            record.as_mut().unwrap().invalidate();
-            record.as_mut().unwrap().start_serialization(payload);
-            record.as_mut().unwrap().end_serialization();
-            drop(record);
-            
-            // Initialize lazy parsing state
-            self.init_lazy_parsing(payload)?;
-            self.parsing_cache_valid = true;
-        } else {
-            // Use existing eager parsing
-            crate::storage::sqlite3_ondisk::read_record(
-                payload,
-                self.get_immutable_record_or_create().as_mut().unwrap(),
-            )?;
-        }
-        Ok(())
-    }
-
-    /// Get a column value using lazy parsing
-    pub fn get_column_lazy(&mut self, column_idx: usize) -> Result<RefValue> {
-        // Detect sequential access pattern
-        if let Some(last) = self.last_accessed_column {
-            if column_idx == last + 1 {
-                self.is_sequential_access = true;
-            } else if column_idx < last {
-                self.is_sequential_access = false;
-            } else if column_idx > last + 1 {
-                // Jumping forward but not sequential
-                self.is_sequential_access = false;
-            }
-        }
-        self.last_accessed_column = Some(column_idx);
-        
-        // Check if we have a cached value first
-        if column_idx < self.cached_values.len() {
-            if let Some(ref value) = self.cached_values[column_idx] {
-                return Ok(value.clone());
-            }
-        }
-        
-        // Parse columns up to the requested one (or more if sequential)
-        let parse_up_to = if self.is_sequential_access {
-            // Parse ahead for sequential access (like SELECT *)
-            std::cmp::min(column_idx + 8, 100) // Parse up to 8 columns ahead or max 100
-        } else {
-            column_idx
-        };
-        
-        // We need to parse more columns - check if we have a record
-        let has_record = self.get_immutable_record().is_some();
-        if !has_record {
-            return Ok(RefValue::Null);
-        }
-        
-        // Parse metadata if needed
-        if self.n_hdr_parsed <= parse_up_to {
-            // Use cached payload if available, otherwise cache it now
-            if self.cached_payload.is_none() {
-                let payload = {
-                    let record = self.get_immutable_record();
-                    record.as_ref().unwrap().get_payload().to_vec()
-                };
-                self.cached_payload = Some(payload);
-            }
-            
-            let payload_ref = self.cached_payload.as_ref().unwrap();
-            let (parsed_count, new_offset) = crate::storage::sqlite3_ondisk::parse_columns_up_to(
-                payload_ref,
-                parse_up_to,
-                self.n_hdr_parsed,
-                self.hdr_offset,
-                self.header_size,
-                &mut self.column_types,
-                &mut self.column_offsets,
-            )?;
-            self.n_hdr_parsed = parsed_count;
-            self.hdr_offset = new_offset;
-            
-            // Ensure cached_values vector is large enough
-            while self.cached_values.len() < parsed_count {
-                self.cached_values.push(None);
-            }
-        }
-        
-        // Parse the actual value
-        let value = {
-            let record = self.get_immutable_record();
-            let payload = record.as_ref().unwrap().get_payload();
-            crate::storage::sqlite3_ondisk::get_column_value_lazy(
-                payload,
-                column_idx,
-                &self.column_types,
-                &self.column_offsets,
-            )?
-        };
-        
-        // Cache small values (integers, floats, small text/blob)
-        let should_cache = match &value {
-            RefValue::Null | RefValue::Integer(_) | RefValue::Float(_) => true,
-            RefValue::Text(t) => t.value.to_slice().len() < 64,
-            RefValue::Blob(b) => b.to_slice().len() < 64,
-        };
-        
-        if should_cache && column_idx < self.cached_values.len() {
-            self.cached_values[column_idx] = Some(value.clone());
-        }
-        
-        Ok(value)
     }
 
     pub fn is_write_in_progress(&self) -> bool {

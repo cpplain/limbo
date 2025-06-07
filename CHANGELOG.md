@@ -1,11 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### Added
-
-* Implement foundation for lazy record parsing (Issue #30) - parse database records incrementally as columns are accessed
-
 ## 0.0.21 - 2025-05-28
 
 ### Added
