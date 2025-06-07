@@ -1,5 +1,7 @@
 # Performance Bug Analysis - Updated June 2025
 
+**NOTE: This document describes bugs found and fixed during the lazy parsing implementation that was subsequently reverted. The code described here no longer exists in the codebase. This is preserved for historical reference.**
+
 ## Initial Critical Bug: Payload Copy (✅ FIXED)
 
 The initial implementation had a critical bug where the entire payload was copied on every column access:

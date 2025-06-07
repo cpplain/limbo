@@ -59,44 +59,24 @@ After extensive analysis of Limbo's lazy parsing implementation, we've discovere
 - **Architectural mismatch**: RefValue → Value conversion negates benefits
 - **Complexity overhead**: State management costs exceed parsing savings
 
-## Recommendations
+## Current State
 
-### Immediate Actions (Priority 1)
+**NOTE: The lazy parsing implementation has been completely reverted. The code no longer exists in the codebase.**
 
-#### 1. Disable Lazy Parsing by Default
-```rust
-pub static LAZY_PARSING_ENABLED: bool = false;
-```
-- Ship with fast eager parsing rather than slow lazy parsing
-- Allow time for proper optimization
+## Future Recommendations
 
-#### 2. Add Runtime Configuration
-```rust
-pub struct ConnectionOptions {
-    pub lazy_parsing_threshold: Option<usize>, // None = disabled
-}
-```
-- Let users opt-in for specific workloads
-- Default to None (disabled)
+Based on the lessons learned from the lazy parsing experiment, here are recommendations for future optimization efforts:
 
-### Short-term Optimizations (Priority 2)
+### Priority 1: Maintain Current Performance
 
-If keeping lazy parsing, strip to SQLite's minimal approach:
+Since lazy parsing has been removed:
+- ✅ Limbo continues using its fast eager parsing
+- ✅ No performance regressions from complex lazy parsing
+- ✅ Codebase remains simple and maintainable
 
-#### 3. Remove Over-Engineering
-- ❌ Remove value caching (`cached_values`)
-- ❌ Remove payload copying (`cached_payload`)
-- ❌ Remove access pattern detection
-- ✅ Keep only header parsing state
+### Priority 2: Alternative Optimizations
 
-#### 4. Implement Column Count Heuristic
-```rust
-const LAZY_PARSING_MIN_COLUMNS: usize = 50;
-
-if cursor.num_columns < LAZY_PARSING_MIN_COLUMNS {
-    return parse_record_eager(cursor)?;
-}
-```
+Instead of re-implementing lazy parsing, consider these approaches:
 
 ### Medium-term Improvements (Priority 3)
 
@@ -175,11 +155,13 @@ if serial_type.is_large_blob() && size > 1024 {
 
 ## Conclusion
 
-Limbo's current lazy parsing implementation is a case of **premature optimization**. The added complexity and overhead outweigh the theoretical benefits, especially given Limbo's efficient eager parsing baseline.
+The lazy parsing experiment was a case of **premature optimization**. The added complexity and overhead outweighed the theoretical benefits, especially given Limbo's efficient eager parsing baseline. **The lazy parsing code has been completely removed from the codebase.**
 
-### Recommended Path Forward
+### Path Forward (Post-Reversion)
 
-1. **Immediate**: Disable lazy parsing to restore performance
+Now that lazy parsing has been removed:
+
+1. **Current state**: Performance has been restored to baseline
 2. **Short-term**: Optimize eager parsing with SIMD and zero-copy
 3. **Medium-term**: Implement projection-based parsing for best of both worlds
 4. **Long-term**: Consider architectural changes for true zero-copy operations
@@ -188,9 +170,9 @@ Limbo's current lazy parsing implementation is a case of **premature optimizatio
 
 **The best optimization is often the code you don't write.** Limbo's strength is its simple, fast eager parsing. Rather than trying to replicate SQLite's optimizations designed for a slower baseline, Limbo should lean into its strengths and optimize what already works well.
 
-### Final Recommendation
+### Recommendations for Future Work
 
-**Remove lazy parsing entirely** and invest the engineering effort into:
+With lazy parsing removed, invest engineering effort into:
 - Making eager parsing even faster
 - Implementing projection-based parsing for wide tables
 - Optimizing the VM to avoid early value materialization

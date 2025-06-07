@@ -1,5 +1,7 @@
 # Lazy Parsing: Technical Implementation Details
 
+**NOTE: This document describes the lazy parsing implementation that was developed and subsequently reverted. The code described here no longer exists in the codebase. This is preserved for historical reference.**
+
 ## Architecture Overview
 
 ### Limbo's Implementation

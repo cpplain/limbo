@@ -1,5 +1,7 @@
 # Issue #30: Lazy Record Parsing Analysis
 
+**NOTE: This document contains the original analysis before the lazy parsing implementation was attempted. The implementation was subsequently developed, tested, and reverted due to performance regressions.**
+
 ## Issue Summary
 - **Issue**: [#30 - Parse record values lazily in `Column` op?](https://github.com/tursodatabase/limbo/issues/30)
 - **Goal**: Improve performance by parsing only the columns that are actually used, rather than parsing entire records upfront
