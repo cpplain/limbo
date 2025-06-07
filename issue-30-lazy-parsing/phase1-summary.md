@@ -36,11 +36,12 @@ Benchmark results show mixed performance improvements:
 
 ## Analysis
 
-The implementation successfully adds projection-based parsing, but falls short of the 50-70% improvement target. Possible reasons:
+The implementation successfully adds projection-based parsing, but falls short of the 50-70% improvement target. After extensive optimization attempts, we discovered:
 
-1. **Overhead**: The column mask checking overhead may be significant for each value
-2. **Implementation efficiency**: The current skip logic might not be optimal
-3. **Other bottlenecks**: Query execution may have other bottlenecks that dominate
+1. **Bitmap optimization**: Implemented u128 bitmap instead of Vec<usize> - minimal improvement
+2. **Sparse records failed**: Attempted to eliminate NULL placeholders but caused regression
+3. **Root cause**: RefValue::Null is essentially free; the real cost is in varint decoding and other operations
+4. **Realistic target**: 10-30% improvement is more achievable given the constraints
 
 ## Next Steps
 
