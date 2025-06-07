@@ -618,6 +618,9 @@ pub struct BTreeCursor {
     stack: PageStack,
     /// Reusable immutable record, used to allow better allocation strategy.
     reusable_immutable_record: RefCell<Option<ImmutableRecord>>,
+    /// Cache for parsed record headers to optimize wide table access (issue #30)
+    /// Enables progressive header parsing instead of parsing all headers upfront
+    header_cache: RefCell<Option<super::sqlite3_ondisk::HeaderCache>>,
     pub index_key_info: Option<IndexKeyInfo>,
     /// Maintain count of the number of records in the btree. Used for the `Count` opcode
     count: usize,
@@ -660,6 +663,7 @@ impl BTreeCursor {
                 stack: RefCell::new([const { None }; BTCURSOR_MAX_DEPTH + 1]),
             },
             reusable_immutable_record: RefCell::new(None),
+            header_cache: RefCell::new(None),
             index_key_info: None,
             count: 0,
             context: None,

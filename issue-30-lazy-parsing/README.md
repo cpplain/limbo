@@ -34,3 +34,15 @@ Implement lazy header parsing - parse column headers incrementally as needed, no
 - Target: Reduce 290µs → ~15µs for selective queries
 - Acceptable: Any improvement >20% is worth shipping
 - Test query: `SELECT col1, col2, col3 FROM table_with_100_columns`
+
+## Implementation Status
+
+Phase 1: Header Caching (In Progress)
+- [x] Add HeaderCache struct to BTreeCursor
+- [ ] Implement cache invalidation on cursor movement  
+- [ ] Add progressive header parsing to read_record()
+- [ ] Create get_column_cached() method
+- [ ] Wire up op_column to use cache
+- [ ] Add tests and run benchmarks
+
+*See git log for detailed progress*

@@ -1015,6 +1015,57 @@ pub fn validate_serial_type(value: u64) -> Result<()> {
     Ok(())
 }
 
+/// HeaderCache optimizes wide table access by caching parsed record headers.
+///
+/// Problem: Reading 3 columns from a 100-column table was 26x slower than SQLite
+/// because we parsed all 100 headers upfront.
+///
+/// Solution: Parse headers progressively and cache offsets for direct column access.
+/// See issue #30 and issue-30-lazy-parsing/ for full analysis.
+pub struct HeaderCache {
+    /// Cached serial types for columns that have been parsed
+    pub serial_types: SmallVec<u64, 64>,
+    /// Byte offsets to the start of each column's data in the payload
+    /// offsets[i] = byte offset to column i's data
+    pub offsets: SmallVec<usize, 64>,
+    /// Number of headers parsed so far (0 to total columns)
+    pub parsed_up_to: usize,
+    /// Position in the header where we stopped parsing (for resuming)
+    pub header_pos: usize,
+    /// Total header size in bytes
+    pub header_size: usize,
+    /// Cache generation - incremented when cursor moves to invalidate cache
+    pub generation: u64,
+}
+
+impl HeaderCache {
+    pub fn new() -> Self {
+        Self {
+            serial_types: SmallVec::new(),
+            offsets: SmallVec::new(),
+            parsed_up_to: 0,
+            header_pos: 0,
+            header_size: 0,
+            generation: 0,
+        }
+    }
+
+    /// Reset the cache when cursor moves to a new record
+    pub fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.parsed_up_to = 0;
+        self.header_pos = 0;
+        self.header_size = 0;
+        self.serial_types.len = 0;
+        self.offsets.len = 0;
+    }
+
+    /// Check if we've already parsed up to the requested column
+    pub fn has_column(&self, column_index: usize) -> bool {
+        column_index < self.parsed_up_to
+    }
+}
+
 pub struct SmallVec<T, const N: usize = 64> {
     /// Stack allocated data
     pub data: [std::mem::MaybeUninit<T>; N],
