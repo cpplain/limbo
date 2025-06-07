@@ -65,7 +65,7 @@ fn create_wide_table_database(num_columns: usize) -> NamedTempFile {
 fn bench_wide_table_access(c: &mut Criterion) {
     println!("\n=== Lazy Parsing Benchmarks ===");
     println!("Testing column access patterns on wide tables");
-    println!("Note: Lazy parsing feature not yet integrated");
+    println!("Projection-based parsing is now active for SELECT queries");
     println!();
     
     // Test with different table widths

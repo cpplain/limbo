@@ -897,6 +897,11 @@ impl ColumnUsedMask {
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }
+    
+    /// Get the raw u128 value of the mask
+    pub fn as_u128(&self) -> u128 {
+        self.0
+    }
 }
 
 #[derive(Clone, Debug)]

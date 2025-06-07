@@ -636,6 +636,11 @@ pub struct BTreeCursor {
     read_overflow_state: Option<ReadPayloadOverflow>,
     /// Contains the current cell_idx for `find_cell`
     find_cell_state: FindCellState,
+    /// Pending column mask for selective record parsing after overflow pages are read
+    pending_column_mask: Option<Vec<usize>>,
+    /// Column mask indicating which columns should be read from records
+    /// None means read all columns, Some(mask) means read only specified columns
+    column_mask: Option<Vec<usize>>,
 }
 
 impl BTreeCursor {
@@ -669,6 +674,8 @@ impl BTreeCursor {
             move_to_state: CursorMoveToState::Start,
             read_overflow_state: None,
             find_cell_state: FindCellState(None),
+            pending_column_mask: None,
+            column_mask: None,
         }
     }
 
@@ -676,8 +683,11 @@ impl BTreeCursor {
         mv_cursor: Option<Rc<RefCell<MvCursor>>>,
         pager: Rc<Pager>,
         root_page: usize,
+        column_mask: Option<Vec<usize>>,
     ) -> Self {
-        Self::new(mv_cursor, pager, root_page, Vec::new())
+        let mut cursor = Self::new(mv_cursor, pager, root_page, Vec::new());
+        cursor.column_mask = column_mask;
+        cursor
     }
 
     pub fn new_index(
@@ -686,9 +696,11 @@ impl BTreeCursor {
         root_page: usize,
         index: &Index,
         collations: Vec<CollationSeq>,
+        column_mask: Option<Vec<usize>>,
     ) -> Self {
         let mut cursor = Self::new(mv_cursor, pager, root_page, collations);
         cursor.index_key_info = Some(IndexKeyInfo::new_from_index(index));
+        cursor.column_mask = column_mask;
         cursor
     }
 
@@ -1015,12 +1027,22 @@ impl BTreeCursor {
             CursorResult::Ok(payload) => {
                 {
                     let mut reuse_immutable = self.get_immutable_record_or_create();
-                    crate::storage::sqlite3_ondisk::read_record(
-                        &payload,
-                        reuse_immutable.as_mut().unwrap(),
-                    )?;
+                    // Use the pending column mask if available
+                    if let Some(mask) = &self.pending_column_mask {
+                        crate::storage::sqlite3_ondisk::read_record_projected(
+                            &payload,
+                            reuse_immutable.as_mut().unwrap(),
+                            Some(mask),
+                        )?;
+                    } else {
+                        crate::storage::sqlite3_ondisk::read_record(
+                            &payload,
+                            reuse_immutable.as_mut().unwrap(),
+                        )?;
+                    }
                 }
                 self.read_overflow_state = None;
+                self.pending_column_mask = None; // Clear the pending mask
                 Ok(CursorResult::Ok(()))
             }
             CursorResult::IO => Ok(CursorResult::IO),
@@ -2321,12 +2343,34 @@ impl BTreeCursor {
         next_page: Option<u32>,
         payload_size: u64,
     ) -> Result<CursorResult<()>> {
+        // Use the cursor's column_mask if available
+        let column_mask = self.column_mask.clone();
+        self.read_record_w_possible_overflow_projected(
+            payload,
+            next_page,
+            payload_size,
+            column_mask.as_deref(),
+        )
+    }
+    
+    fn read_record_w_possible_overflow_projected(
+        &mut self,
+        payload: &'static [u8],
+        next_page: Option<u32>,
+        payload_size: u64,
+        column_mask: Option<&[usize]>,
+    ) -> Result<CursorResult<()>> {
         if let Some(next_page) = next_page {
+            // For overflow pages, we still need to read all data first
+            // Then apply projection after the full payload is assembled
+            // Store the column mask for use after overflow reading
+            self.pending_column_mask = column_mask.map(|mask| mask.to_vec());
             self.process_overflow_read(payload, next_page, payload_size)
         } else {
-            crate::storage::sqlite3_ondisk::read_record(
+            crate::storage::sqlite3_ondisk::read_record_projected(
                 payload,
                 self.get_immutable_record_or_create().as_mut().unwrap(),
+                column_mask,
             )?;
             Ok(CursorResult::Ok(()))
         }
@@ -5217,6 +5261,66 @@ impl BTreeCursor {
 
     pub fn allocate_page(&self, page_type: PageType, offset: usize) -> BTreePage {
         self.pager.do_allocate_page(page_type, offset)
+    }
+    
+    /// Read the current record with column projection.
+    /// Only the columns specified in column_mask will be parsed from the payload.
+    /// Other columns will be set to NULL in the record.
+    pub fn read_current_record_projected(&mut self, column_mask: Option<&[usize]>) -> Result<CursorResult<()>> {
+        if !matches!(self.has_record.get(), CursorHasRecord::Yes { .. }) {
+            return Ok(CursorResult::Ok(()));
+        }
+        
+        let page = self.stack.top();
+        return_if_locked_maybe_load!(self.pager, page);
+        let page = page.get();
+        let contents = page.get().contents.as_ref().unwrap();
+        
+        let cell_idx = self.stack.current_cell_index();
+        if cell_idx < 0 || cell_idx >= contents.cell_count() as i32 {
+            return Ok(CursorResult::Ok(()));
+        }
+        
+        let cell = contents.cell_get(
+            cell_idx as usize,
+            payload_overflow_threshold_max(contents.page_type(), self.usable_space() as u16),
+            payload_overflow_threshold_min(contents.page_type(), self.usable_space() as u16),
+            self.usable_space(),
+        )?;
+        
+        match cell {
+            BTreeCell::TableLeafCell(TableLeafCell {
+                _payload,
+                first_overflow_page,
+                payload_size,
+                ..
+            }) => {
+                return_if_io!(self.read_record_w_possible_overflow_projected(
+                    _payload,
+                    first_overflow_page,
+                    payload_size,
+                    column_mask
+                ));
+            }
+            BTreeCell::IndexLeafCell(IndexLeafCell {
+                payload,
+                first_overflow_page,
+                payload_size,
+            }) => {
+                return_if_io!(self.read_record_w_possible_overflow_projected(
+                    payload,
+                    first_overflow_page,
+                    payload_size,
+                    column_mask
+                ));
+            }
+            _ => {
+                // Interior cells don't have full records
+                return Ok(CursorResult::Ok(()));
+            }
+        }
+        
+        Ok(CursorResult::Ok(()))
     }
 }
 

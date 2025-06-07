@@ -287,6 +287,10 @@ pub enum Insn {
     OpenRead {
         cursor_id: CursorID,
         root_page: PageIdx,
+        /// Optional column mask indicating which columns will be accessed.
+        /// If None, all columns may be accessed (backwards compatibility).
+        /// Each bit represents a column (bit 0 = column 0, etc.)
+        column_mask: Option<u128>,
     },
 
     /// Open a cursor for a virtual table.

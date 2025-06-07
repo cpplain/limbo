@@ -179,15 +179,24 @@ pub fn init_loop(
                 (OperationMode::SELECT, Table::BTree(btree)) => {
                     let root_page = btree.root_page;
                     if let Some(cursor_id) = table_cursor_id {
+                        // For SELECT, use the column mask from the table's col_used_mask
+                        let column_mask = if table.col_used_mask.is_empty() {
+                            None // Empty mask means we don't know, so access all columns
+                        } else {
+                            Some(table.col_used_mask.as_u128())
+                        };
                         program.emit_insn(Insn::OpenRead {
                             cursor_id,
                             root_page,
+                            column_mask,
                         });
                     }
                     if let Some(index_cursor_id) = index_cursor_id {
+                        // For index cursors, we typically need all columns in the index
                         program.emit_insn(Insn::OpenRead {
                             cursor_id: index_cursor_id,
                             root_page: index.as_ref().unwrap().root_page,
+                            column_mask: None,
                         });
                     }
                 }
@@ -255,9 +264,16 @@ pub fn init_loop(
                 match mode {
                     OperationMode::SELECT => {
                         if let Some(table_cursor_id) = table_cursor_id {
+                            // For SELECT, use the column mask from the table's col_used_mask
+                            let column_mask = if table.col_used_mask.is_empty() {
+                                None // Empty mask means we don't know, so access all columns
+                            } else {
+                                Some(table.col_used_mask.as_u128())
+                            };
                             program.emit_insn(Insn::OpenRead {
                                 cursor_id: table_cursor_id,
                                 root_page: table.table.get_root_page(),
+                                column_mask,
                             });
                         }
                     }
@@ -308,10 +324,12 @@ pub fn init_loop(
                     if !index.ephemeral {
                         match mode {
                             OperationMode::SELECT => {
+                                // For index cursors, we typically need all columns in the index
                                 program.emit_insn(Insn::OpenRead {
                                     cursor_id: index_cursor_id
                                         .expect("index cursor is always opened in Seek with index"),
                                     root_page: index.root_page,
+                                    column_mask: None,
                                 });
                             }
                             OperationMode::UPDATE | OperationMode::DELETE => {

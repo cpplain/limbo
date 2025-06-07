@@ -911,6 +911,7 @@ pub fn op_open_read(
     let Insn::OpenRead {
         cursor_id,
         root_page,
+        column_mask,
     } = insn
     else {
         unreachable!("unexpected Insn {:?}", insn)
@@ -927,10 +928,20 @@ pub fn op_open_read(
         }
         None => None,
     };
+    // Convert u128 column mask to Vec<usize> for column indices
+    let column_mask_vec = column_mask.map(|mask| {
+        let mut indices = Vec::new();
+        for i in 0..128 {
+            if mask & (1u128 << i) != 0 {
+                indices.push(i);
+            }
+        }
+        indices
+    });
     let mut cursors = state.cursors.borrow_mut();
     match cursor_type {
         CursorType::BTreeTable(_) => {
-            let cursor = BTreeCursor::new_table(mv_cursor, pager.clone(), *root_page);
+            let cursor = BTreeCursor::new_table(mv_cursor, pager.clone(), *root_page, column_mask_vec.clone());
             cursors
                 .get_mut(*cursor_id)
                 .unwrap()
@@ -962,6 +973,7 @@ pub fn op_open_read(
                 *root_page,
                 index.as_ref(),
                 collations,
+                column_mask_vec,
             );
             cursors
                 .get_mut(*cursor_id)
@@ -4268,13 +4280,14 @@ pub fn op_open_write(
             root_page as usize,
             index.as_ref(),
             collations,
+            None, // No column mask for write operations
         );
         cursors
             .get_mut(*cursor_id)
             .unwrap()
             .replace(Cursor::new_btree(cursor));
     } else {
-        let cursor = BTreeCursor::new_table(mv_cursor, pager.clone(), root_page as usize);
+        let cursor = BTreeCursor::new_table(mv_cursor, pager.clone(), root_page as usize, None);
         cursors
             .get_mut(*cursor_id)
             .unwrap()
@@ -4767,9 +4780,10 @@ pub fn op_open_ephemeral(
                 .iter()
                 .map(|c| c.collation.unwrap_or_default())
                 .collect(),
+            None, // No column mask for this operation
         )
     } else {
-        BTreeCursor::new_table(mv_cursor, pager, root_page as usize)
+        BTreeCursor::new_table(mv_cursor, pager, root_page as usize, None)
     };
     cursor.rewind()?; // Will never return io
 

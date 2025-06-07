@@ -801,6 +801,7 @@ pub fn translate_drop_table(
         program.emit_insn(Insn::OpenRead {
             cursor_id: sqlite_schema_cursor_id_1,
             root_page: 1usize.into(),
+            column_mask: None,
         });
 
         let schema_column_0_register = program.alloc_register();

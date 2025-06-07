@@ -125,6 +125,7 @@ pub fn translate_create_index(
     program.emit_insn(Insn::OpenRead {
         cursor_id: table_cursor_id,
         root_page: tbl.root_page,
+        column_mask: None,
     });
 
     let loop_start_label = program.allocate_label();

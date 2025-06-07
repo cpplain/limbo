@@ -1135,6 +1135,108 @@ pub fn read_record(payload: &[u8], reuse_immutable: &mut ImmutableRecord) -> Res
     Ok(())
 }
 
+/// Reads only the projected columns from a record payload.
+/// The `column_mask` parameter specifies which columns to parse:
+/// - If None, all columns are parsed (same as read_record)
+/// - If Some(mask), only columns whose indices are in the mask are parsed
+/// 
+/// For columns not in the mask, we skip their data without parsing to RefValue.
+pub fn read_record_projected(
+    payload: &[u8], 
+    reuse_immutable: &mut ImmutableRecord,
+    column_mask: Option<&[usize]>
+) -> Result<()> {
+    // Let's clear previous use
+    reuse_immutable.invalidate();
+    // Copy payload to ImmutableRecord in order to make RefValue that point to this new buffer.
+    // By reusing this immutable record we make it less allocation expensive.
+    reuse_immutable.start_serialization(payload);
+
+    let mut pos = 0;
+    let (header_size, nr) = read_varint(payload)?;
+    assert!((header_size as usize) >= nr);
+    let mut header_size = (header_size as usize) - nr;
+    pos += nr;
+
+    let mut serial_types = SmallVec::<u64, 64>::new();
+    while header_size > 0 {
+        let (serial_type, nr) = read_varint(&reuse_immutable.get_payload()[pos..])?;
+        validate_serial_type(serial_type)?;
+        serial_types.push(serial_type);
+        pos += nr;
+        assert!(header_size >= nr);
+        header_size -= nr;
+    }
+
+    // If no column mask is provided, parse all columns
+    if column_mask.is_none() {
+        for &serial_type in &serial_types.data[..serial_types.len.min(serial_types.data.len())] {
+            let (value, n) = read_value(&reuse_immutable.get_payload()[pos..], unsafe {
+                serial_type.assume_init().try_into()?
+            })?;
+            pos += n;
+            reuse_immutable.add_value(value);
+        }
+        if let Some(extra) = serial_types.extra_data.as_ref() {
+            for serial_type in extra {
+                let (value, n) = read_value(
+                    &reuse_immutable.get_payload()[pos..],
+                    (*serial_type).try_into()?,
+                )?;
+                pos += n;
+                reuse_immutable.add_value(value);
+            }
+        }
+    } else {
+        // Selective parsing based on column mask
+        let mask = column_mask.unwrap();
+        let mut column_idx = 0;
+        
+        // Process columns from the stack-allocated portion
+        for &serial_type in &serial_types.data[..serial_types.len.min(serial_types.data.len())] {
+            let serial_type: SerialType = unsafe { serial_type.assume_init().try_into()? };
+            
+            if mask.contains(&column_idx) {
+                // Parse this column
+                let (value, n) = read_value(&reuse_immutable.get_payload()[pos..], serial_type)?;
+                pos += n;
+                reuse_immutable.add_value(value);
+            } else {
+                // Skip this column - just advance past its data
+                pos += serial_type.size();
+                // Add a null placeholder to maintain column indices
+                reuse_immutable.add_value(RefValue::Null);
+            }
+            column_idx += 1;
+        }
+        
+        // Process columns from the heap-allocated portion
+        if let Some(extra) = serial_types.extra_data.as_ref() {
+            for serial_type in extra {
+                let serial_type: SerialType = (*serial_type).try_into()?;
+                
+                if mask.contains(&column_idx) {
+                    // Parse this column
+                    let (value, n) = read_value(
+                        &reuse_immutable.get_payload()[pos..],
+                        serial_type,
+                    )?;
+                    pos += n;
+                    reuse_immutable.add_value(value);
+                } else {
+                    // Skip this column
+                    pos += serial_type.size();
+                    // Add a null placeholder to maintain column indices
+                    reuse_immutable.add_value(RefValue::Null);
+                }
+                column_idx += 1;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Reads a value that might reference the buffer it is reading from. Be sure to store RefValue with the buffer
 /// always.
 #[inline(always)]
@@ -1851,5 +1953,65 @@ mod tests {
         });
 
         assert_eq!(small_vec.get(8), None);
+    }
+
+    #[test]
+    fn test_read_record_projected() {
+        use crate::types::{Record, Text};
+        
+        // Create a test record with 5 columns
+        let record = Record::new(vec![
+            Value::Integer(42),
+            Value::Text(Text::new("hello")),
+            Value::Float(3.14),
+            Value::Blob(vec![1, 2, 3]),
+            Value::Integer(100),
+        ]);
+        
+        // Serialize the record
+        let mut payload = Vec::new();
+        record.serialize(&mut payload);
+        
+        // Test 1: Read all columns (no projection)
+        let mut immutable1 = ImmutableRecord::new(4096, 10);
+        read_record_projected(&payload, &mut immutable1, None).unwrap();
+        assert_eq!(immutable1.len(), 5);
+        assert_eq!(immutable1.get_value(0), &RefValue::Integer(42));
+        assert_eq!(immutable1.get_value(1).to_owned(), Value::build_text("hello"));
+        assert_eq!(immutable1.get_value(2), &RefValue::Float(3.14));
+        assert_eq!(immutable1.get_value(3).to_owned(), Value::Blob(vec![1, 2, 3]));
+        assert_eq!(immutable1.get_value(4), &RefValue::Integer(100));
+        
+        // Test 2: Read only columns 0, 2, 4
+        let mut immutable2 = ImmutableRecord::new(4096, 10);
+        let mask = vec![0, 2, 4];
+        read_record_projected(&payload, &mut immutable2, Some(&mask)).unwrap();
+        assert_eq!(immutable2.len(), 5);
+        assert_eq!(immutable2.get_value(0), &RefValue::Integer(42));
+        assert_eq!(immutable2.get_value(1), &RefValue::Null); // Not projected
+        assert_eq!(immutable2.get_value(2), &RefValue::Float(3.14));
+        assert_eq!(immutable2.get_value(3), &RefValue::Null); // Not projected
+        assert_eq!(immutable2.get_value(4), &RefValue::Integer(100));
+        
+        // Test 3: Read only column 1
+        let mut immutable3 = ImmutableRecord::new(4096, 10);
+        let mask = vec![1];
+        read_record_projected(&payload, &mut immutable3, Some(&mask)).unwrap();
+        assert_eq!(immutable3.len(), 5);
+        assert_eq!(immutable3.get_value(0), &RefValue::Null); // Not projected
+        assert_eq!(immutable3.get_value(1).to_owned(), Value::build_text("hello"));
+        assert_eq!(immutable3.get_value(2), &RefValue::Null); // Not projected
+        assert_eq!(immutable3.get_value(3), &RefValue::Null); // Not projected
+        assert_eq!(immutable3.get_value(4), &RefValue::Null); // Not projected
+        
+        // Test 4: Empty mask (no columns)
+        let mut immutable4 = ImmutableRecord::new(4096, 10);
+        let mask = vec![];
+        read_record_projected(&payload, &mut immutable4, Some(&mask)).unwrap();
+        assert_eq!(immutable4.len(), 5);
+        // All columns should be NULL
+        for i in 0..5 {
+            assert_eq!(immutable4.get_value(i), &RefValue::Null);
+        }
     }
 }

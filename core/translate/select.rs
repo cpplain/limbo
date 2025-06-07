@@ -19,9 +19,98 @@ use crate::{schema::Schema, vdbe::builder::ProgramBuilder, Result};
 use limbo_sqlite3_parser::ast::{self, CompoundSelect, SortOrder};
 use limbo_sqlite3_parser::ast::{ResultColumn, SelectInner};
 
+/// Access pattern for a query, used to determine optimization strategies
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AccessPattern {
+    /// Full table scan - all columns are needed
+    FullScan,
+    /// Selective access - only specific columns are needed
+    Selective,
+}
+
+/// Information about which columns are projected (needed) in a query
+#[derive(Debug, Clone)]
+pub struct ProjectionInfo {
+    /// Bitmask of columns that need to be parsed (one bit per column, up to 128 columns)
+    pub needed_columns: u128,
+    /// Access pattern for the query
+    pub access_pattern: AccessPattern,
+    /// Whether the query contains aggregate functions
+    pub has_aggregates: bool,
+}
+
 pub struct TranslateSelectResult {
     pub program: ProgramBuilder,
     pub num_result_cols: usize,
+}
+
+impl ProjectionInfo {
+    /// Analyze a SELECT plan to determine which columns need to be parsed
+    pub fn analyze_select_plan(select_plan: &SelectPlan) -> Self {
+        // Check if all columns have already been marked as used due to SELECT * or other reasons
+        let has_all_columns_used = select_plan.joined_tables().iter().any(|table| {
+            // If column mask is empty, it means we don't know which columns are used, so assume all
+            if table.col_used_mask.is_empty() {
+                return true;
+            }
+            // Check if all columns up to the table's column count are marked as used
+            let col_count = table.columns().len();
+            if col_count > 128 {
+                return true; // Tables with more than 128 columns need all columns
+            }
+            // Check if all columns are marked as used
+            (0..col_count).all(|idx| table.column_is_used(idx))
+        });
+
+        if has_all_columns_used {
+            return Self {
+                needed_columns: !0u128, // All bits set - need all columns
+                access_pattern: AccessPattern::FullScan,
+                has_aggregates: !select_plan.aggregates.is_empty(),
+            };
+        }
+
+        // Collect column masks from all joined tables
+        let mut combined_mask = 0u128;
+        let mut total_columns_used = 0;
+        
+        for joined_table in select_plan.joined_tables() {
+            // Check each column individually using the get method
+            for col_idx in 0..128 {
+                if joined_table.column_is_used(col_idx) {
+                    combined_mask |= 1u128 << col_idx;
+                    total_columns_used += 1;
+                }
+            }
+        }
+
+        // Determine access pattern based on how many columns are needed
+        let access_pattern = if combined_mask == !0u128 || total_columns_used > 10 {
+            AccessPattern::FullScan
+        } else {
+            AccessPattern::Selective
+        };
+
+        Self {
+            needed_columns: combined_mask,
+            access_pattern,
+            has_aggregates: !select_plan.aggregates.is_empty(),
+        }
+    }
+
+    /// Check if a specific column index needs to be parsed
+    pub fn column_needed(&self, column_idx: usize) -> bool {
+        if column_idx >= 128 {
+            // For tables with more than 128 columns, fall back to parsing all
+            return true;
+        }
+        (self.needed_columns & (1u128 << column_idx)) != 0
+    }
+
+    /// Get the number of columns that need to be parsed
+    pub fn needed_column_count(&self) -> usize {
+        self.needed_columns.count_ones() as usize
+    }
 }
 
 pub fn translate_select(

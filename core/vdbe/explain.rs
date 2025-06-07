@@ -357,6 +357,7 @@ pub fn insn_to_str(
             Insn::OpenRead {
                 cursor_id,
                 root_page,
+                column_mask,
             } => (
                 "OpenRead",
                 *cursor_id as i32,
@@ -377,10 +378,13 @@ pub fn insn_to_str(
                                 }
                             });
                     format!(
-                        "{}={}, root={}",
+                        "{}={}, root={}{}",
                         cursor_type,
                         get_table_or_index_name(*cursor_id),
-                        root_page
+                        root_page,
+                        column_mask.map_or(String::new(), |mask| 
+                            format!(", column_mask={:#x}", mask)
+                        )
                     )
                 },
             ),
