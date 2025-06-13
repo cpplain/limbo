@@ -8,12 +8,13 @@
 
 ## Week 1: Foundation
 ### Benchmarking (Day 1-2)
-- [ ] Create `core/benches/lazy_parsing_benchmark.rs`
-- [ ] Implement benchmarks for:
-  - [ ] Selective column access (10%, 25%, 50%, 100%)
-  - [ ] Aggregation queries (COUNT, SUM, AVG)
-  - [ ] Various table widths (10, 25, 50, 100 columns)
-- [ ] Run and save baseline metrics
+- [x] Create benchmark implementation ✓
+- [x] Implement benchmarks for: ✓
+  - [x] Selective column access (10%, 25%, 50%, 100%) ✓
+  - [x] Aggregation queries (COUNT, SUM, AVG) ✓
+  - [x] Various table widths (10, 25, 50, 100 columns) ✓
+- [x] Run and save baseline metrics ✓
+- **Note**: Benchmark code and results stored in `benchmarks/` subdirectory
 
 ### Data Structures (Day 3-4)
 - [ ] Add `LazyParseState` struct to `core/types.rs`
