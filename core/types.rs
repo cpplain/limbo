@@ -707,6 +707,87 @@ pub enum ParseRecordState {
     Parsing { payload: Vec<u8> },
 }
 
+#[cfg(feature = "lazy_parsing")]
+#[derive(Debug)]
+pub enum ParsedMask {
+    /// Bitmask for ≤64 columns  
+    Small(u64),
+    /// Multiple u64s for >64 columns
+    Large(Vec<u64>),
+}
+
+#[cfg(feature = "lazy_parsing")]
+impl ParsedMask {
+    /// Check if a column at the given index has been parsed
+    pub fn is_parsed(&self, idx: usize) -> bool {
+        match self {
+            ParsedMask::Small(mask) => {
+                if idx >= 64 {
+                    false
+                } else {
+                    (mask & (1u64 << idx)) != 0
+                }
+            }
+            ParsedMask::Large(masks) => {
+                let chunk = idx / 64;
+                let bit = idx % 64;
+                if chunk >= masks.len() {
+                    false
+                } else {
+                    (masks[chunk] & (1u64 << bit)) != 0
+                }
+            }
+        }
+    }
+
+    /// Mark a column at the given index as parsed
+    pub fn set_parsed(&mut self, idx: usize) {
+        match self {
+            ParsedMask::Small(mask) => {
+                if idx < 64 {
+                    *mask |= 1u64 << idx;
+                }
+            }
+            ParsedMask::Large(masks) => {
+                let chunk = idx / 64;
+                let bit = idx % 64;
+                if chunk < masks.len() {
+                    masks[chunk] |= 1u64 << bit;
+                }
+            }
+        }
+    }
+
+    /// Count the number of parsed columns
+    pub fn parsed_count(&self) -> usize {
+        match self {
+            ParsedMask::Small(mask) => mask.count_ones() as usize,
+            ParsedMask::Large(masks) => masks.iter().map(|m| m.count_ones() as usize).sum(),
+        }
+    }
+
+    /// Check if we should parse all remaining columns (>50% already parsed)
+    pub fn should_parse_remaining(&self, total_columns: u16) -> bool {
+        let parsed = self.parsed_count();
+        parsed > (total_columns as usize / 2)
+    }
+}
+
+#[cfg(feature = "lazy_parsing")]
+#[derive(Debug)]
+pub struct LazyParseState {
+    /// Serial types for each column
+    pub serial_types: Vec<u64>,
+    /// Byte offset where each column's data starts
+    pub column_offsets: Vec<u16>,
+    /// Tracks which columns have been parsed
+    pub parsed_mask: ParsedMask,
+    /// Total number of columns
+    pub column_count: u16,
+    /// Size of the record header in bytes
+    pub header_size: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Record {
     values: Vec<Value>,

@@ -2,8 +2,8 @@
 
 ## Pre-Implementation
 - [ ] Create feature branch `feature/lazy-record-parsing`
-- [ ] Add `lazy_parsing` feature flag to `Cargo.toml`
-- [ ] Set up baseline benchmarks and save results
+- [x] Add `lazy_parsing` feature flag to `Cargo.toml` ✓ (2025-12-06)
+- [x] Set up baseline benchmarks and save results ✓
 - [ ] Review this checklist with the team
 
 ## Week 1: Foundation
@@ -17,16 +17,16 @@
 - **Note**: Benchmark code and results stored in `benchmarks/` subdirectory
 
 ### Data Structures (Day 3-4)
-- [ ] Add `LazyParseState` struct to `core/types.rs`
-- [ ] Implement `ParsedMask` enum (Small/Large)
-- [ ] Add SmallVec dependencies
-- [ ] Write unit tests for new structures
+- [x] Add `LazyParseState` struct to `core/types.rs` ✓ (lines 776-789)
+- [x] Implement `ParsedMask` enum (Small/Large) ✓ (lines 710-774)
+- [x] Add SmallVec dependencies ✓ (used existing implementation)
+- [x] Write unit tests for new structures ✓
 
 ### Header Parsing (Day 5)
-- [ ] Implement `parse_record_header()` in `sqlite3_ondisk.rs`
-- [ ] Add `calculate_value_size()` helper
-- [ ] Implement serial type validation
-- [ ] Test header parsing with various record types
+- [x] Implement `parse_record_header()` in `sqlite3_ondisk.rs` ✓ (lines 1161-1207)
+- [x] Add `calculate_value_size()` helper ✓ (lines 1152-1159)
+- [x] Implement serial type validation ✓ (reused existing)
+- [x] Test header parsing with various record types ✓ (5 unit tests)
 
 ## Week 2-3: Core Implementation
 ### ImmutableRecord Changes

@@ -10,6 +10,9 @@ description = "Integration & fuzz tests"
 [lib]
 path = "lib.rs"
 
+[features]
+lazy_parsing = ["limbo_core/lazy_parsing"]
+
 [[test]]
 name = "integration_tests"
 path = "integration/mod.rs"

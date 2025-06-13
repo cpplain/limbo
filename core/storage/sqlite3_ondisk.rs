@@ -1149,6 +1149,63 @@ pub fn read_record(payload: &[u8], reuse_immutable: &mut ImmutableRecord) -> Res
     Ok(())
 }
 
+#[cfg(feature = "lazy_parsing")]
+/// Calculate the size in bytes needed to store a value with the given serial type
+#[inline(always)]
+pub fn calculate_value_size(serial_type: u64) -> Result<usize> {
+    use crate::types::SerialType;
+    let st = SerialType::try_from(serial_type)?;
+    Ok(st.size())
+}
+
+#[cfg(feature = "lazy_parsing")]
+/// Parse only the header of a record to prepare for lazy column parsing
+pub fn parse_record_header(payload: &[u8]) -> Result<crate::types::LazyParseState> {
+    use crate::types::{LazyParseState, ParsedMask};
+    
+    let mut pos = 0;
+    let (header_size, nr) = read_varint(payload)?;
+    assert!((header_size as usize) >= nr);
+    let mut remaining_header = (header_size as usize) - nr;
+    pos += nr;
+    
+    let mut serial_types = Vec::new();
+    
+    // Parse serial types from header
+    while remaining_header > 0 {
+        let (serial_type, nr) = read_varint(&payload[pos..])?;
+        validate_serial_type(serial_type)?;
+        serial_types.push(serial_type);
+        pos += nr;
+        assert!(remaining_header >= nr);
+        remaining_header -= nr;
+    }
+    
+    // Calculate column offsets
+    let mut column_offsets = Vec::with_capacity(serial_types.len());
+    let mut data_pos = header_size as usize;
+    
+    for &serial_type in &serial_types {
+        column_offsets.push(data_pos as u16);
+        data_pos += calculate_value_size(serial_type)?;
+    }
+    
+    let column_count = serial_types.len() as u16;
+    let parsed_mask = if column_count <= 64 {
+        ParsedMask::Small(0)
+    } else {
+        ParsedMask::Large(vec![0; (column_count as usize + 63) / 64])
+    };
+    
+    Ok(LazyParseState {
+        serial_types,
+        column_offsets,
+        parsed_mask,
+        column_count,
+        header_size: header_size as u16,
+    })
+}
+
 /// Reads a value that might reference the buffer it is reading from. Be sure to store RefValue with the buffer
 /// always.
 #[inline(always)]
@@ -1865,5 +1922,165 @@ mod tests {
         });
 
         assert_eq!(small_vec.get(8), None);
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_calculate_value_size() {
+        // Test fixed-size types
+        assert_eq!(calculate_value_size(0).unwrap(), 0); // NULL
+        assert_eq!(calculate_value_size(1).unwrap(), 1); // I8
+        assert_eq!(calculate_value_size(2).unwrap(), 2); // I16
+        assert_eq!(calculate_value_size(3).unwrap(), 3); // I24
+        assert_eq!(calculate_value_size(4).unwrap(), 4); // I32
+        assert_eq!(calculate_value_size(5).unwrap(), 6); // I48
+        assert_eq!(calculate_value_size(6).unwrap(), 8); // I64
+        assert_eq!(calculate_value_size(7).unwrap(), 8); // F64
+        assert_eq!(calculate_value_size(8).unwrap(), 0); // CONST_INT0
+        assert_eq!(calculate_value_size(9).unwrap(), 0); // CONST_INT1
+        
+        // Test variable-size types (blob/text)
+        assert_eq!(calculate_value_size(12).unwrap(), 0); // Empty blob
+        assert_eq!(calculate_value_size(13).unwrap(), 0); // Empty text
+        assert_eq!(calculate_value_size(14).unwrap(), 1); // 1-byte blob
+        assert_eq!(calculate_value_size(15).unwrap(), 1); // 1-byte text
+        assert_eq!(calculate_value_size(24).unwrap(), 6); // 6-byte blob
+        assert_eq!(calculate_value_size(25).unwrap(), 6); // 6-byte text
+        
+        // Test invalid serial types
+        assert!(calculate_value_size(10).is_err());
+        assert!(calculate_value_size(11).is_err());
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_parse_record_header_simple() {
+        use crate::types::ParsedMask;
+        
+        // Create a simple record with 3 columns: NULL, I32, TEXT(5)
+        let mut payload = Vec::new();
+        
+        // Header size varint (includes header size itself)
+        // The header will be: 1 byte for header size + 3 bytes for serial types = 4 bytes total
+        write_varint_to_vec(4, &mut payload); // Total header size
+        
+        // Serial types
+        write_varint_to_vec(0, &mut payload);  // NULL
+        write_varint_to_vec(4, &mut payload);  // I32 (4 bytes)
+        write_varint_to_vec(23, &mut payload); // TEXT with 5 bytes: (23-13)/2 = 5
+        
+        // Add dummy data (we only care about header parsing)
+        payload.extend_from_slice(&[0, 0, 0, 0]); // 4 bytes for I32
+        payload.extend_from_slice(b"hello");      // 5 bytes for TEXT
+        
+        let state = parse_record_header(&payload).unwrap();
+        
+        assert_eq!(state.column_count, 3);
+        assert_eq!(state.header_size, 4);
+        assert_eq!(state.serial_types, vec![0, 4, 23]);
+        assert_eq!(state.column_offsets, vec![4, 4, 8]); // NULL at 4, I32 at 4, TEXT at 8
+        
+        // Check parsed mask is initialized correctly
+        match &state.parsed_mask {
+            ParsedMask::Small(mask) => assert_eq!(*mask, 0),
+            _ => panic!("Expected Small mask for 3 columns"),
+        }
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_parse_record_header_many_columns() {
+        use crate::types::ParsedMask;
+        
+        // Create a record with 100 columns (all I32)
+        let mut payload = Vec::new();
+        
+        // Calculate header size: 1 byte for each serial type (all < 128) + header size varint
+        let header_content_size = 100; // 100 single-byte varints
+        let header_size = header_content_size + 1; // +1 for header size varint (101 fits in 1 byte)
+        
+        write_varint_to_vec(header_size as u64, &mut payload);
+        
+        // Write 100 serial types (all I32)
+        for _ in 0..100 {
+            write_varint_to_vec(4, &mut payload); // I32
+        }
+        
+        // Add dummy data (4 bytes per column)
+        payload.extend_from_slice(&vec![0; 400]);
+        
+        let state = parse_record_header(&payload).unwrap();
+        
+        assert_eq!(state.column_count, 100);
+        assert_eq!(state.header_size, header_size as u16);
+        assert_eq!(state.serial_types.len(), 100);
+        
+        // Check offsets are correct
+        for i in 0..100 {
+            assert_eq!(state.column_offsets[i], (header_size + i * 4) as u16);
+        }
+        
+        // Check parsed mask is Large variant for >64 columns
+        match &state.parsed_mask {
+            ParsedMask::Large(masks) => {
+                assert_eq!(masks.len(), 2); // Need 2 u64s for 100 columns
+                assert_eq!(masks[0], 0);
+                assert_eq!(masks[1], 0);
+            }
+            _ => panic!("Expected Large mask for 100 columns"),
+        }
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_parse_record_header_empty() {
+        // Create an empty record (0 columns)
+        let mut payload = Vec::new();
+        write_varint_to_vec(1, &mut payload); // Header size is just the varint itself
+        
+        let state = parse_record_header(&payload).unwrap();
+        
+        assert_eq!(state.column_count, 0);
+        assert_eq!(state.header_size, 1);
+        assert_eq!(state.serial_types.len(), 0);
+        assert_eq!(state.column_offsets.len(), 0);
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_parsed_mask_operations() {
+        use crate::types::ParsedMask;
+        
+        // Test Small mask
+        let mut small_mask = ParsedMask::Small(0);
+        assert!(!small_mask.is_parsed(0));
+        assert!(!small_mask.is_parsed(63));
+        
+        small_mask.set_parsed(0);
+        assert!(small_mask.is_parsed(0));
+        assert!(!small_mask.is_parsed(1));
+        
+        small_mask.set_parsed(63);
+        assert!(small_mask.is_parsed(63));
+        assert_eq!(small_mask.parsed_count(), 2);
+        
+        // Test Large mask
+        let mut large_mask = ParsedMask::Large(vec![0, 0]);
+        assert!(!large_mask.is_parsed(0));
+        assert!(!large_mask.is_parsed(64));
+        assert!(!large_mask.is_parsed(127));
+        
+        large_mask.set_parsed(0);
+        large_mask.set_parsed(64);
+        large_mask.set_parsed(127);
+        
+        assert!(large_mask.is_parsed(0));
+        assert!(large_mask.is_parsed(64));
+        assert!(large_mask.is_parsed(127));
+        assert_eq!(large_mask.parsed_count(), 3);
+        
+        // Test should_parse_remaining
+        assert!(!small_mask.should_parse_remaining(10)); // 2 of 10 parsed = 20%
+        assert!(small_mask.should_parse_remaining(3));   // 2 of 3 parsed = 66%
     }
 }
