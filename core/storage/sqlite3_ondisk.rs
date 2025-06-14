@@ -1111,16 +1111,26 @@ pub fn read_record(payload: &[u8], reuse_immutable: &mut ImmutableRecord) -> Res
     
     #[cfg(feature = "lazy_parsing")]
     {
-        // Parse only the header for lazy parsing
-        let lazy_state = parse_record_header(payload)?;
+        // Smart heuristics: Only use lazy parsing for wide tables with large payloads
+        const MIN_COLUMNS_FOR_LAZY: u16 = 8;
+        const MIN_PAYLOAD_SIZE_FOR_LAZY: usize = 256;
         
-        // Initialize the record for lazy parsing
-        reuse_immutable.init_lazy(payload, lazy_state);
+        // Check payload size first (cheap check)
+        if payload.len() > MIN_PAYLOAD_SIZE_FOR_LAZY {
+            // Parse only the header to check column count
+            let lazy_state = parse_record_header(payload)?;
+            
+            // Only use lazy parsing if both conditions are met
+            if lazy_state.column_count > MIN_COLUMNS_FOR_LAZY {
+                // Initialize the record for lazy parsing
+                reuse_immutable.init_lazy(payload, lazy_state);
+                return Ok(());
+            }
+        }
         
-        return Ok(());
+        // Fall through to eager parsing for small records
     }
     
-    #[cfg(not(feature = "lazy_parsing"))]
     {
         // Copy payload to ImmutableRecord in order to make RefValue that point to this new buffer.
         // By reusing this immutable record we make it less allocation expensive.

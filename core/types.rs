@@ -18,6 +18,7 @@ use crate::vdbe::Register;
 use crate::vtab::VirtualTableCursor;
 use crate::Result;
 use std::fmt::Display;
+use std::sync::Arc;
 
 const MAX_REAL_SIZE: u8 = 15;
 
@@ -698,7 +699,11 @@ pub struct ImmutableRecord {
     // We have to be super careful with this buffer since we make values point to the payload we need to take care reallocations
     // happen in a controlled manner. If we realocate with values that should be correct, they will now point to undefined data.
     // We don't use pin here because it would make it imposible to reuse the buffer if we need to push a new record in the same struct.
+    // Using Arc<[u8]> for lazy parsing to avoid copying the entire payload
+    #[cfg(not(feature = "lazy_parsing"))]
     payload: Vec<u8>,
+    #[cfg(feature = "lazy_parsing")]
+    payload: Option<Arc<[u8]>>,
     #[cfg(not(feature = "lazy_parsing"))]
     pub values: Vec<RefValue>,
     #[cfg(feature = "lazy_parsing")]
@@ -867,9 +872,13 @@ impl<'a> AppendWriter<'a> {
 }
 
 impl ImmutableRecord {
+    #[allow(unused_variables)]
     pub fn new(payload_capacity: usize, value_capacity: usize) -> Self {
         Self {
+            #[cfg(not(feature = "lazy_parsing"))]
             payload: Vec::with_capacity(payload_capacity),
+            #[cfg(feature = "lazy_parsing")]
+            payload: None,
             values: Vec::with_capacity(value_capacity),
             recreating: false,
             #[cfg(feature = "lazy_parsing")]
@@ -881,7 +890,7 @@ impl ImmutableRecord {
     pub fn new_lazy(payload: Vec<u8>, lazy_state: LazyParseState) -> Self {
         let column_count = lazy_state.column_count as usize;
         Self {
-            payload,
+            payload: Some(Arc::from(payload.into_boxed_slice())),
             values: vec![None; column_count],
             recreating: false,
             lazy_state: Some(lazy_state),
@@ -891,7 +900,7 @@ impl ImmutableRecord {
     #[cfg(feature = "lazy_parsing")]
     pub fn init_lazy(&mut self, payload: &[u8], lazy_state: LazyParseState) {
         let column_count = lazy_state.column_count as usize;
-        self.payload = payload.to_vec();
+        self.payload = Some(Arc::from(payload));
         self.values = vec![None; column_count];
         self.recreating = false;
         self.lazy_state = Some(lazy_state);
@@ -1128,7 +1137,10 @@ impl ImmutableRecord {
 
         writer.assert_finish_capacity();
         Self {
+            #[cfg(not(feature = "lazy_parsing"))]
             payload: buf,
+            #[cfg(feature = "lazy_parsing")]
+            payload: Some(Arc::from(buf.into_boxed_slice())),
             values,
             recreating: false,
             #[cfg(feature = "lazy_parsing")]
@@ -1138,7 +1150,15 @@ impl ImmutableRecord {
 
     pub fn start_serialization(&mut self, payload: &[u8]) {
         self.recreating = true;
+        #[cfg(not(feature = "lazy_parsing"))]
         self.payload.extend_from_slice(payload);
+        #[cfg(feature = "lazy_parsing")]
+        {
+            // For lazy parsing, we need to convert to Vec first, then back to Arc
+            let mut vec = self.payload.take().map(|arc| arc.to_vec()).unwrap_or_default();
+            vec.extend_from_slice(payload);
+            self.payload = Some(Arc::from(vec.into_boxed_slice()));
+        }
     }
     pub fn end_serialization(&mut self) {
         assert!(self.recreating);
@@ -1158,16 +1178,31 @@ impl ImmutableRecord {
     }
 
     pub fn invalidate(&mut self) {
+        #[cfg(not(feature = "lazy_parsing"))]
         self.payload.clear();
+        #[cfg(feature = "lazy_parsing")]
+        { self.payload = None; }
         self.values.clear();
     }
 
+    #[cfg(not(feature = "lazy_parsing"))]
     pub fn is_invalidated(&self) -> bool {
         self.payload.is_empty()
     }
+    
+    #[cfg(feature = "lazy_parsing")]
+    pub fn is_invalidated(&self) -> bool {
+        self.payload.is_none()
+    }
 
+    #[cfg(not(feature = "lazy_parsing"))]
     pub fn get_payload(&self) -> &[u8] {
         &self.payload
+    }
+    
+    #[cfg(feature = "lazy_parsing")]
+    pub fn get_payload(&self) -> &[u8] {
+        self.payload.as_ref().map(|arc| arc.as_ref()).unwrap_or(&[])
     }
 
     #[cfg(feature = "lazy_parsing")]
@@ -1183,18 +1218,20 @@ impl ImmutableRecord {
             let offset = lazy_state.column_offsets[column] as usize;
             
             // Parse the value from the payload
-            let buf = &self.payload[offset..];
-            let (value, _) = read_value(buf, SerialType(serial_type))?;
-            
-            // Store the parsed value
-            self.values[column] = Some(value);
-            
-            // Mark as parsed
-            lazy_state.parsed_mask.set_parsed(column);
-            
-            // Check if we should parse remaining columns
-            if lazy_state.parsed_mask.should_parse_remaining(lazy_state.column_count) {
-                self.parse_remaining_columns()?;
+            if let Some(ref payload_arc) = self.payload {
+                let buf = &payload_arc[offset..];
+                let (value, _) = read_value(buf, SerialType(serial_type))?;
+                
+                // Store the parsed value
+                self.values[column] = Some(value);
+                
+                // Mark as parsed
+                lazy_state.parsed_mask.set_parsed(column);
+                
+                // Check if we should parse remaining columns
+                if lazy_state.parsed_mask.should_parse_remaining(lazy_state.column_count) {
+                    self.parse_remaining_columns()?;
+                }
             }
             
             Ok(())
@@ -1271,6 +1308,7 @@ impl Display for ImmutableRecord {
 
 impl Clone for ImmutableRecord {
     fn clone(&self) -> Self {
+        #[allow(unused_mut)]
         let mut new_values = Vec::new();
         let new_payload = self.payload.clone();
         
@@ -1283,10 +1321,16 @@ impl Clone for ImmutableRecord {
                     RefValue::Float(f) => RefValue::Float(*f),
                     RefValue::Text(text_ref) => {
                         // let's update pointer
+                        #[cfg(not(feature = "lazy_parsing"))]
                         let ptr_start = self.payload.as_ptr() as usize;
+                        #[cfg(feature = "lazy_parsing")]
+                        let ptr_start = self.payload.as_ref().map(|arc| arc.as_ptr() as usize).unwrap_or(0);
                         let ptr_end = text_ref.value.data as usize;
                         let len = ptr_end - ptr_start;
+                        #[cfg(not(feature = "lazy_parsing"))]
                         let new_ptr = unsafe { new_payload.as_ptr().add(len) };
+                        #[cfg(feature = "lazy_parsing")]
+                        let new_ptr = unsafe { new_payload.as_ref().map(|arc| arc.as_ptr().add(len)).unwrap() };
                         RefValue::Text(TextRef {
                             value: RawSlice::new(new_ptr, text_ref.value.len),
                             subtype: text_ref.subtype.clone(),
@@ -1306,38 +1350,8 @@ impl Clone for ImmutableRecord {
         
         #[cfg(feature = "lazy_parsing")]
         {
-            for value in &self.values {
-                let value = match value {
-                    Some(ref_value) => {
-                        let cloned = match ref_value {
-                            RefValue::Null => RefValue::Null,
-                            RefValue::Integer(i) => RefValue::Integer(*i),
-                            RefValue::Float(f) => RefValue::Float(*f),
-                            RefValue::Text(text_ref) => {
-                                // let's update pointer
-                                let ptr_start = self.payload.as_ptr() as usize;
-                                let ptr_end = text_ref.value.data as usize;
-                                let len = ptr_end - ptr_start;
-                                let new_ptr = unsafe { new_payload.as_ptr().add(len) };
-                                RefValue::Text(TextRef {
-                                    value: RawSlice::new(new_ptr, text_ref.value.len),
-                                    subtype: text_ref.subtype.clone(),
-                                })
-                            }
-                            RefValue::Blob(raw_slice) => {
-                                let ptr_start = self.payload.as_ptr() as usize;
-                                let ptr_end = raw_slice.data as usize;
-                                let len = ptr_end - ptr_start;
-                                let new_ptr = unsafe { new_payload.as_ptr().add(len) };
-                                RefValue::Blob(RawSlice::new(new_ptr, raw_slice.len))
-                            }
-                        };
-                        Some(cloned)
-                    }
-                    None => None,
-                };
-                new_values.push(value);
-            }
+            // With Arc, cloned Arc points to same memory, so pointers remain valid
+            new_values = self.values.clone();
         }
         
         Self {
