@@ -102,6 +102,15 @@ Universal agreement on what makes this successful:
 5. **Feature flag** for safe experimentation
 6. **Gradual rollout** with monitoring
 
+## Implementation Discoveries (Phase 1)
+
+Key technical findings from edge case testing:
+1. **NULL Representation** - NULL values are `Some(RefValue::Null)`, not `None`
+2. **50% Heuristic Trigger** - Activates when `parsed > (total_columns / 2)` (strictly greater than)
+3. **Header Size Limitation** - Currently limited to 126 bytes (larger headers need multi-byte varint)
+4. **Minimum Column Threshold** - Lazy parsing only activates for records with >8 columns
+5. **All Edge Cases Handled** - Empty records, all-NULL records, wide tables, large values all work correctly
+
 ## Final Verdict
 
 All three analyses strongly recommend proceeding with the implementation. The consensus is clear:

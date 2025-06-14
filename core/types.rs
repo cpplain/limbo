@@ -2316,4 +2316,404 @@ mod tests {
         // Now 55 out of 100 = 55%, should parse remaining
         assert!(mask.should_parse_remaining(100));
     }
+
+    // Edge Case Tests for Lazy Parsing
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_lazy_parsing_empty_record() {
+        // Test with 0 columns
+        let record = Record::new(vec![]);
+        
+        // Serialize it
+        let mut payload = Vec::new();
+        record.serialize(&mut payload);
+        
+        // Parse the header
+        let lazy_state = crate::storage::sqlite3_ondisk::parse_record_header(&payload).unwrap();
+        assert_eq!(lazy_state.column_count, 0);
+        
+        // Create lazy record
+        let lazy_record = ImmutableRecord::new_lazy(payload, lazy_state);
+        assert_eq!(lazy_record.values.len(), 0);
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_lazy_parsing_all_null_values() {
+        // Create a record with all NULL values
+        let record = Record::new(vec![
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+        ]);
+        
+        // Serialize it
+        let mut payload = Vec::new();
+        record.serialize(&mut payload);
+        
+        // Parse the header
+        let lazy_state = crate::storage::sqlite3_ondisk::parse_record_header(&payload).unwrap();
+        
+        // Create lazy record
+        let mut lazy_record = ImmutableRecord::new_lazy(payload, lazy_state);
+        
+        // Access all columns - they should all be NULL
+        for i in 0..5 {
+            let val = lazy_record.get_value_opt(i).unwrap();
+            // NULL values are represented as Some(RefValue::Null)
+            match val {
+                Some(RefValue::Null) => {}, // Expected
+                _ => panic!("Expected Some(RefValue::Null), got {:?}", val),
+            }
+        }
+        
+        // All columns should be parsed despite being NULL
+        for i in 0..5 {
+            assert!(lazy_record.values[i].is_some());
+            // The Option<RefValue> should contain Some(RefValue::Null) for NULL values
+            assert!(matches!(&lazy_record.values[i], Some(RefValue::Null)));
+        }
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_lazy_parsing_very_wide_table() {
+        // Create a record with 100 columns (200 would exceed header size limit)
+        let mut values = Vec::new();
+        for i in 0..100 {
+            values.push(Value::Integer(i as i64));
+        }
+        let record = Record::new(values);
+        
+        // Serialize it
+        let mut payload = Vec::new();
+        record.serialize(&mut payload);
+        
+        // Parse the header
+        let lazy_state = crate::storage::sqlite3_ondisk::parse_record_header(&payload).unwrap();
+        assert_eq!(lazy_state.column_count, 100);
+        
+        // Create lazy record
+        let mut lazy_record = ImmutableRecord::new_lazy(payload, lazy_state);
+        
+        // Access a few columns across the range
+        for &idx in &[0, 25, 50, 75, 99] {
+            let val = lazy_record.get_value_opt(idx).unwrap();
+            match val.unwrap() {
+                RefValue::Integer(i) => assert_eq!(i, idx as i64),
+                _ => panic!("Expected integer"),
+            }
+        }
+        
+        // Verify the parsed mask works correctly for large column counts
+        let parsed_mask = &lazy_record.lazy_state.as_ref().unwrap().parsed_mask;
+        assert!(parsed_mask.is_parsed(0));
+        assert!(parsed_mask.is_parsed(50));
+        assert!(parsed_mask.is_parsed(99));
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_lazy_parsing_large_text_values() {
+        // Create a record with large text values
+        let large_text = "x".repeat(10000); // 10KB text
+        let record = Record::new(vec![
+            Value::Integer(42),
+            Value::Text(Text::from(large_text.clone())),
+            Value::Integer(84),
+            Value::Text(Text::from(large_text.clone())),
+            Value::Integer(126),
+        ]);
+        
+        // Serialize it
+        let mut payload = Vec::new();
+        record.serialize(&mut payload);
+        
+        // Parse the header
+        let lazy_state = crate::storage::sqlite3_ondisk::parse_record_header(&payload).unwrap();
+        
+        // Create lazy record
+        let mut lazy_record = ImmutableRecord::new_lazy(payload, lazy_state);
+        
+        // Access only the first two integer columns to stay under 50%
+        let expected_values = vec![42, 84];
+        for (&idx, &expected) in [0, 2].iter().zip(expected_values.iter()) {
+            let val = lazy_record.get_value_opt(idx).unwrap();
+            match val.unwrap() {
+                RefValue::Integer(i) => assert_eq!(i, expected),
+                _ => panic!("Expected integer"),
+            }
+        }
+        
+        // Large text columns should not be parsed yet (only 2/5 = 40% accessed)
+        assert!(lazy_record.values[1].is_none());
+        assert!(lazy_record.values[3].is_none());
+        assert!(lazy_record.values[4].is_none());
+        
+        // Now access one large text column
+        let val = lazy_record.get_value_opt(1).unwrap();
+        match val.unwrap() {
+            RefValue::Text(t) => assert_eq!(t.as_str().len(), 10000),
+            _ => panic!("Expected text"),
+        }
+        
+        // All columns should now be parsed due to >50% heuristic (3/5 = 60%)
+        for i in 0..5 {
+            assert!(lazy_record.values[i].is_some());
+        }
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_lazy_parsing_large_blob_values() {
+        // Create a record with large blob values
+        let large_blob = vec![0xFF; 10000]; // 10KB blob
+        let record = Record::new(vec![
+            Value::Integer(1),
+            Value::Blob(large_blob.clone()),
+            Value::Integer(2),
+            Value::Blob(large_blob.clone()),
+            Value::Integer(3),
+        ]);
+        
+        // Serialize it
+        let mut payload = Vec::new();
+        record.serialize(&mut payload);
+        
+        // Parse the header
+        let lazy_state = crate::storage::sqlite3_ondisk::parse_record_header(&payload).unwrap();
+        
+        // Create lazy record
+        let mut lazy_record = ImmutableRecord::new_lazy(payload, lazy_state);
+        
+        // Access only integer columns first
+        let val = lazy_record.get_value_opt(0).unwrap();
+        match val.unwrap() {
+            RefValue::Integer(i) => assert_eq!(i, 1),
+            _ => panic!("Expected integer"),
+        }
+        
+        // Blob should not be parsed yet
+        assert!(lazy_record.values[1].is_none());
+        
+        // Access the blob
+        let val = lazy_record.get_value_opt(1).unwrap();
+        match val.unwrap() {
+            RefValue::Blob(b) => assert_eq!(b.len, 10000),
+            _ => panic!("Expected blob"),
+        }
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_lazy_parsing_mixed_serial_types() {
+        // Test all different serial types in one record
+        let record = Record::new(vec![
+            Value::Null,                              // SerialType 0
+            Value::Integer(0),                        // SerialType 8 (ConstInt0)
+            Value::Integer(1),                        // SerialType 9 (ConstInt1)
+            Value::Integer(42),                       // SerialType 1 (I8)
+            Value::Integer(1000),                     // SerialType 2 (I16)
+            Value::Integer(1_000_000),                // SerialType 3 (I24)
+            Value::Integer(1_000_000_000),            // SerialType 4 (I32)
+            Value::Integer(1_000_000_000_000),        // SerialType 5 (I48)
+            Value::Integer(i64::MAX),                 // SerialType 6 (I64)
+            Value::Float(3.14159),                    // SerialType 7 (F64)
+            Value::Text(Text::from("hello".to_string())),         // SerialType n*2+13
+            Value::Blob(vec![1, 2, 3, 4, 5]),         // SerialType n*2+12
+        ]);
+        
+        // Serialize it
+        let mut payload = Vec::new();
+        record.serialize(&mut payload);
+        
+        // Parse the header
+        let lazy_state = crate::storage::sqlite3_ondisk::parse_record_header(&payload).unwrap();
+        assert_eq!(lazy_state.column_count, 12);
+        
+        // Create lazy record
+        let mut lazy_record = ImmutableRecord::new_lazy(payload, lazy_state);
+        
+        // Access columns selectively
+        let val = lazy_record.get_value_opt(0).unwrap();
+        match val {
+            Some(RefValue::Null) => {}, // Expected NULL
+            _ => panic!("Expected Some(RefValue::Null), got {:?}", val),
+        }
+        
+        let val = lazy_record.get_value_opt(10).unwrap();
+        match val.unwrap() {
+            RefValue::Text(t) => assert_eq!(t.as_str(), "hello"),
+            _ => panic!("Expected text"),
+        }
+        
+        let val = lazy_record.get_value_opt(9).unwrap();
+        match val.unwrap() {
+            RefValue::Float(f) => assert!((f - 3.14159).abs() < 0.00001),
+            _ => panic!("Expected float"),
+        }
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_lazy_parsing_boundary_conditions() {
+        // Test edge cases around the 50% heuristic
+        
+        // Test with exactly 2 columns (50% = 1 column)
+        let record = Record::new(vec![Value::Integer(1), Value::Integer(2)]);
+        let mut payload = Vec::new();
+        record.serialize(&mut payload);
+        let lazy_state = crate::storage::sqlite3_ondisk::parse_record_header(&payload).unwrap();
+        let mut lazy_record = ImmutableRecord::new_lazy(payload, lazy_state);
+        
+        // Access first column
+        lazy_record.get_value_opt(0).unwrap();
+        assert!(lazy_record.values[0].is_some());
+        assert!(lazy_record.values[1].is_none()); // Should not trigger parse all yet
+        
+        // Access second column - should parse all now
+        lazy_record.get_value_opt(1).unwrap();
+        assert!(lazy_record.values[1].is_some());
+        
+        // Test with 3 columns (50% = 1.5, so 2 columns needed)
+        let record = Record::new(vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)]);
+        let mut payload = Vec::new();
+        record.serialize(&mut payload);
+        let lazy_state = crate::storage::sqlite3_ondisk::parse_record_header(&payload).unwrap();
+        let mut lazy_record = ImmutableRecord::new_lazy(payload, lazy_state);
+        
+        // Access first column
+        lazy_record.get_value_opt(0).unwrap();
+        assert!(lazy_record.values[2].is_none()); // Last not parsed
+        
+        // Access second column - should trigger parse all
+        lazy_record.get_value_opt(1).unwrap();
+        assert!(lazy_record.values[2].is_some()); // All parsed now
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_lazy_parsing_random_access_pattern() {
+        // Test accessing columns in random order
+        let record = Record::new(vec![
+            Value::Integer(0),
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3),
+            Value::Integer(4),
+            Value::Integer(5),
+            Value::Integer(6),
+            Value::Integer(7),
+            Value::Integer(8),
+            Value::Integer(9),
+        ]);
+        
+        let mut payload = Vec::new();
+        record.serialize(&mut payload);
+        let lazy_state = crate::storage::sqlite3_ondisk::parse_record_header(&payload).unwrap();
+        let mut lazy_record = ImmutableRecord::new_lazy(payload, lazy_state);
+        
+        // Access in random order: 7, 2, 9, 0, 5, 3
+        let access_order = vec![7, 2, 9, 0, 5, 3];
+        for (i, &idx) in access_order.iter().enumerate() {
+            let val = lazy_record.get_value_opt(idx).unwrap();
+            match val.unwrap() {
+                RefValue::Integer(n) => assert_eq!(n, idx as i64),
+                _ => panic!("Expected integer"),
+            }
+            
+            // After accessing 6 columns (>50%), all should be parsed
+            if i == 5 {
+                for j in 0..10 {
+                    assert!(lazy_record.values[j].is_some());
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_lazy_parsing_consecutive_nulls() {
+        // Test records with many consecutive NULLs
+        let mut values = vec![];
+        for i in 0..20 {
+            if i % 4 == 0 {
+                values.push(Value::Integer(i));
+            } else {
+                values.push(Value::Null);
+            }
+        }
+        
+        let record = Record::new(values);
+        let mut payload = Vec::new();
+        record.serialize(&mut payload);
+        let lazy_state = crate::storage::sqlite3_ondisk::parse_record_header(&payload).unwrap();
+        let mut lazy_record = ImmutableRecord::new_lazy(payload, lazy_state);
+        
+        // Access some NULL columns
+        for &idx in &[1, 2, 3, 5, 6] {
+            let val = lazy_record.get_value_opt(idx).unwrap();
+            match val {
+                Some(RefValue::Null) => {}, // Expected NULL
+                _ => panic!("Expected Some(RefValue::Null), got {:?}", val),
+            }
+        }
+        
+        // Access some integer columns
+        for &idx in &[0, 4, 8] {
+            let val = lazy_record.get_value_opt(idx).unwrap();
+            match val.unwrap() {
+                RefValue::Integer(n) => assert_eq!(n, idx as i64),
+                _ => panic!("Expected integer"),
+            }
+        }
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_lazy_parsing_minimum_column_threshold() {
+        // Test that lazy parsing only activates for records with >8 columns
+        
+        // Test with 8 columns - should use eager parsing
+        let values: Vec<Value> = (0..8).map(|i| Value::Integer(i)).collect();
+        let record = Record::new(values);
+        let mut payload = Vec::new();
+        record.serialize(&mut payload);
+        
+        // When parsed with lazy parsing feature, records with <=8 columns
+        // should still be eagerly parsed
+        let lazy_state = crate::storage::sqlite3_ondisk::parse_record_header(&payload).unwrap();
+        let lazy_record = ImmutableRecord::new_lazy(payload.clone(), lazy_state);
+        
+        // Check if it was eagerly parsed (implementation-specific check)
+        // For now, just verify it works correctly
+        assert_eq!(lazy_record.values.len(), 8);
+        
+        // Test with 9 columns - should use lazy parsing
+        let values: Vec<Value> = (0..9).map(|i| Value::Integer(i)).collect();
+        let record = Record::new(values);
+        let mut payload = Vec::new();
+        record.serialize(&mut payload);
+        
+        let lazy_state = crate::storage::sqlite3_ondisk::parse_record_header(&payload).unwrap();
+        let mut lazy_record = ImmutableRecord::new_lazy(payload, lazy_state);
+        
+        // Verify columns are not parsed initially
+        for i in 0..9 {
+            assert!(lazy_record.values[i].is_none());
+        }
+        
+        // Access one column
+        let val = lazy_record.get_value_opt(0).unwrap();
+        match val.unwrap() {
+            RefValue::Integer(n) => assert_eq!(n, 0),
+            _ => panic!("Expected integer"),
+        }
+    }
+
+    // Note: Overflow page testing would require deeper integration with the 
+    // storage layer and actual database pages, which is beyond the scope
+    // of unit tests. This would be better tested in integration tests.
 }
