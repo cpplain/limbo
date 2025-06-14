@@ -2106,6 +2106,10 @@ mod tests {
         
         // Test should_parse_remaining
         assert!(!small_mask.should_parse_remaining(10)); // 2 of 10 parsed = 20%
-        assert!(small_mask.should_parse_remaining(3));   // 2 of 3 parsed = 66%
+        assert!(!small_mask.should_parse_remaining(3));  // 2 of 3 parsed = 66% < 75%
+        
+        // Add one more parsed column to test the threshold
+        small_mask.set_parsed(1);
+        assert!(small_mask.should_parse_remaining(3));   // 3 of 3 parsed = 100% > 75%
     }
 }

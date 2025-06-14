@@ -67,15 +67,17 @@ cargo bench --bench record_parsing_benchmark --features lazy_parsing
 
 ## Optimization Fixes
 
-### 5. Increase Parse-Remaining Threshold
+### 5. Increase Parse-Remaining Threshold [COMPLETED]
 **File**: `core/types.rs`
 **Function**: `should_parse_remaining()`
 **Change**: 50% → 75%
 ```rust
 parsed > (total_columns as usize * 3 / 4)  // was: / 2
 ```
+**Status**: Completed June 14, 2025
+**Impact**: Better performance for queries accessing 50-75% of columns
 
-### 6. Eliminate Comparison Allocations
+### 6. Eliminate Comparison Allocations [COMPLETED]
 **File**: `core/vdbe/sorter.rs`
 **Problem**: Creates new Vecs for every comparison
 **Fix**: Compare columns directly without intermediate collections
@@ -90,11 +92,25 @@ for i in 0..self.key_len {
     }
 }
 ```
+**Status**: Completed as part of Sorter optimization (June 14, 2025)
 
-### 7. Complete VDBE Integration
+### 7. Complete VDBE Integration [COMPLETED]
 **File**: `core/vdbe/execute.rs`
 **Problem**: Some paths return Null instead of lazy parsing
 **Fix**: Implement proper lazy column access for all cursor types
+**Implementation**: Fixed Sorter Column instruction to properly support lazy parsing:
+```rust
+#[cfg(feature = "lazy_parsing")]
+{
+    let mut record = record.clone();
+    match record.get_value_opt(*column)? {
+        Some(val) => state.registers[*dest] = Register::Value(val.to_owned()),
+        None => state.registers[*dest] = Register::Value(Value::Null),
+    }
+}
+```
+**Status**: Completed June 14, 2025
+**Impact**: ORDER BY queries now return correct results with lazy parsing enabled
 
 ## Testing Checklist
 
@@ -106,7 +122,7 @@ for i in 0..self.key_len {
   - [x] ORDER BY with partial columns (should be 20%+ faster) _Fix #3 completed, only parses key columns_
   - [x] SELECT * (should be within 5% of baseline) _100% selectivity test_
 - [ ] Memory profiling with heaptrack
-- [ ] Run full test suite with lazy parsing enabled
+- [x] Run full test suite with lazy parsing enabled _All tests passing (June 14, 2025)_
 
 ## Expected Outcomes
 

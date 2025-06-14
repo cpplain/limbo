@@ -1461,8 +1461,11 @@ pub fn op_column(
                 }
                 #[cfg(feature = "lazy_parsing")]
                 {
-                    // TODO: Implement proper lazy parsing support for Sorter
-                    state.registers[*dest] = Register::Value(Value::Null);
+                    let mut record = record.clone();
+                    match record.get_value_opt(*column)? {
+                        Some(val) => state.registers[*dest] = Register::Value(val.to_owned()),
+                        None => state.registers[*dest] = Register::Value(Value::Null),
+                    }
                 }
             } else {
                 state.registers[*dest] = Register::Value(Value::Null);

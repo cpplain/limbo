@@ -787,10 +787,10 @@ impl ParsedMask {
         }
     }
 
-    /// Check if we should parse all remaining columns (>50% already parsed)
+    /// Check if we should parse all remaining columns (>75% already parsed)
     pub fn should_parse_remaining(&self, total_columns: u16) -> bool {
         let parsed = self.parsed_count();
-        parsed > (total_columns as usize / 2)
+        parsed > (total_columns as usize * 3 / 4)
     }
 }
 
@@ -2241,7 +2241,20 @@ mod tests {
             _ => panic!("Expected text"),
         }
         
-        // All columns should now be parsed because we accessed 2/3 columns (>50%)
+        // Two columns parsed, but third should not be parsed yet (2/3 = 66% < 75%)
+        assert!(lazy_record.values[0].is_some());
+        assert!(lazy_record.values[1].is_some());
+        assert!(lazy_record.values[2].is_none());
+        
+        // Access third column - this should trigger parsing all remaining
+        let val = lazy_record.get_value_opt(2).unwrap();
+        assert!(val.is_some());
+        match val.unwrap() {
+            RefValue::Null => {}, // Expected
+            _ => panic!("Expected null"),
+        }
+        
+        // All columns should now be parsed
         assert!(lazy_record.values[0].is_some());
         assert!(lazy_record.values[1].is_some());
         assert!(lazy_record.values[2].is_some());
@@ -2249,7 +2262,7 @@ mod tests {
 
     #[cfg(feature = "lazy_parsing")]
     #[test]
-    fn test_lazy_parsing_50_percent_heuristic() {
+    fn test_lazy_parsing_75_percent_heuristic() {
         // Create a record with 5 values
         let record = Record::new(vec![
             Value::Integer(1),
@@ -2279,9 +2292,15 @@ mod tests {
         assert!(lazy_record.values[1].is_some());
         assert!(lazy_record.values[4].is_none()); // Still not parsed
         
-        // Access third column - this should trigger parsing all remaining
-        // because we've accessed >50% of columns (3 out of 5)
+        // Access third column - this should NOT trigger parsing all remaining
+        // because we've only accessed 60% of columns (3 out of 5)
         lazy_record.get_value_opt(2).unwrap();
+        assert!(lazy_record.values[2].is_some());
+        assert!(lazy_record.values[4].is_none()); // Still not parsed
+        
+        // Access fourth column - this should trigger parsing all remaining
+        // because we've accessed >75% of columns (4 out of 5)
+        lazy_record.get_value_opt(3).unwrap();
         
         // All columns should now be parsed
         for i in 0..5 {
@@ -2319,7 +2338,14 @@ mod tests {
         mask.set_parsed(7);
         mask.set_parsed(8);
         
-        // Now 6 out of 10 = 60%, should parse remaining
+        // Now 6 out of 10 = 60%, should NOT parse remaining
+        assert!(!mask.should_parse_remaining(10));
+        
+        // Mark two more columns
+        mask.set_parsed(2);
+        mask.set_parsed(4);
+        
+        // Now 8 out of 10 = 80%, should parse remaining
         assert!(mask.should_parse_remaining(10));
     }
 
@@ -2343,11 +2369,11 @@ mod tests {
         assert_eq!(mask.parsed_count(), 4);
         
         // Parse many more to trigger the heuristic
-        for i in 0..55 {
+        for i in 0..76 {
             mask.set_parsed(i);
         }
         
-        // Now 55 out of 100 = 55%, should parse remaining
+        // Now 76 out of 100 = 76%, should parse remaining
         assert!(mask.should_parse_remaining(100));
     }
 
@@ -2471,7 +2497,7 @@ mod tests {
         // Create lazy record
         let mut lazy_record = ImmutableRecord::new_lazy(payload, lazy_state);
         
-        // Access only the first two integer columns to stay under 50%
+        // Access only the first two integer columns to stay under 75%
         let expected_values = vec![42, 84];
         for (&idx, &expected) in [0, 2].iter().zip(expected_values.iter()) {
             let val = lazy_record.get_value_opt(idx).unwrap();
@@ -2493,7 +2519,18 @@ mod tests {
             _ => panic!("Expected text"),
         }
         
-        // All columns should now be parsed due to >50% heuristic (3/5 = 60%)
+        // Still should not parse all (3/5 = 60% < 75%)
+        assert!(lazy_record.values[3].is_none());
+        assert!(lazy_record.values[4].is_none());
+        
+        // Access fourth column to trigger parse all
+        let val = lazy_record.get_value_opt(4).unwrap();
+        match val.unwrap() {
+            RefValue::Integer(i) => assert_eq!(i, 126),
+            _ => panic!("Expected integer"),
+        }
+        
+        // All columns should now be parsed due to >75% heuristic (4/5 = 80%)
         for i in 0..5 {
             assert!(lazy_record.values[i].is_some());
         }
@@ -2593,9 +2630,9 @@ mod tests {
     #[cfg(feature = "lazy_parsing")]
     #[test]
     fn test_lazy_parsing_boundary_conditions() {
-        // Test edge cases around the 50% heuristic
+        // Test edge cases around the 75% heuristic
         
-        // Test with exactly 2 columns (50% = 1 column)
+        // Test with exactly 2 columns (75% = 1.5, so both columns needed)
         let record = Record::new(vec![Value::Integer(1), Value::Integer(2)]);
         let mut payload = Vec::new();
         record.serialize(&mut payload);
@@ -2611,20 +2648,22 @@ mod tests {
         lazy_record.get_value_opt(1).unwrap();
         assert!(lazy_record.values[1].is_some());
         
-        // Test with 3 columns (50% = 1.5, so 2 columns needed)
-        let record = Record::new(vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)]);
+        // Test with 4 columns (75% = 3, so need to access all 4 columns)
+        let record = Record::new(vec![Value::Integer(1), Value::Integer(2), Value::Integer(3), Value::Integer(4)]);
         let mut payload = Vec::new();
         record.serialize(&mut payload);
         let lazy_state = crate::storage::sqlite3_ondisk::parse_record_header(&payload).unwrap();
         let mut lazy_record = ImmutableRecord::new_lazy(payload, lazy_state);
         
-        // Access first column
+        // Access first three columns
         lazy_record.get_value_opt(0).unwrap();
-        assert!(lazy_record.values[2].is_none()); // Last not parsed
-        
-        // Access second column - should trigger parse all
         lazy_record.get_value_opt(1).unwrap();
-        assert!(lazy_record.values[2].is_some()); // All parsed now
+        lazy_record.get_value_opt(2).unwrap();
+        assert!(lazy_record.values[3].is_none()); // Last not parsed yet (3/4 = 75%, not >75%)
+        
+        // Access fourth column - should trigger parse all
+        lazy_record.get_value_opt(3).unwrap();
+        assert!(lazy_record.values[3].is_some()); // All parsed now
     }
 
     #[cfg(feature = "lazy_parsing")]
@@ -2649,8 +2688,8 @@ mod tests {
         let lazy_state = crate::storage::sqlite3_ondisk::parse_record_header(&payload).unwrap();
         let mut lazy_record = ImmutableRecord::new_lazy(payload, lazy_state);
         
-        // Access in random order: 7, 2, 9, 0, 5, 3
-        let access_order = vec![7, 2, 9, 0, 5, 3];
+        // Access in random order: 7, 2, 9, 0, 5, 3, 1, 4
+        let access_order = vec![7, 2, 9, 0, 5, 3, 1, 4];
         for (i, &idx) in access_order.iter().enumerate() {
             let val = lazy_record.get_value_opt(idx).unwrap();
             match val.unwrap() {
@@ -2658,8 +2697,8 @@ mod tests {
                 _ => panic!("Expected integer"),
             }
             
-            // After accessing 6 columns (>50%), all should be parsed
-            if i == 5 {
+            // After accessing 8 columns (>75%), all should be parsed
+            if i == 7 {
                 for j in 0..10 {
                     assert!(lazy_record.values[j].is_some());
                 }
