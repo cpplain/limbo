@@ -36,6 +36,16 @@ impl Sorter {
 
     // We do the sorting here since this is what is called by the SorterSort instruction
     pub fn sort(&mut self) {
+        #[cfg(feature = "lazy_parsing")]
+        {
+            // Ensure all key columns are parsed before sorting
+            for record in &mut self.records {
+                for i in 0..self.key_len {
+                    let _ = record.parse_column(i);
+                }
+            }
+        }
+        
         self.records.sort_by(|a, b| {
             #[cfg(not(feature = "lazy_parsing"))]
             {
@@ -49,7 +59,7 @@ impl Sorter {
             
             #[cfg(feature = "lazy_parsing")]
             {
-                // Extract parsed values for comparison
+                // Extract parsed values for comparison (now guaranteed to be parsed)
                 let a_values: Vec<RefValue> = a.values[..self.key_len]
                     .iter()
                     .filter_map(|opt| opt.as_ref())

@@ -1957,15 +1957,15 @@ pub fn op_row_id(
             let rowid = {
                 let mut index_cursor = state.get_cursor(index_cursor_id);
                 let index_cursor = index_cursor.as_btree_mut();
-                let record = match index_cursor.record()? {
-                    CursorResult::IO => {
-                        break 'd Some((index_cursor_id, table_cursor_id));
-                    }
-                    CursorResult::Ok(record) => record,
-                };
-                let record = record.as_ref().unwrap();
                 #[cfg(not(feature = "lazy_parsing"))]
                 let rowid_value = {
+                    let record = match index_cursor.record()? {
+                        CursorResult::IO => {
+                            break 'd Some((index_cursor_id, table_cursor_id));
+                        }
+                        CursorResult::Ok(record) => record,
+                    };
+                    let record = record.as_ref().unwrap();
                     let rowid = record.get_values().last().unwrap();
                     match rowid {
                         RefValue::Integer(rowid) => *rowid,
@@ -1975,6 +1975,15 @@ pub fn op_row_id(
                 
                 #[cfg(feature = "lazy_parsing")]
                 let rowid_value = {
+                    let mut record = match index_cursor.record_mut()? {
+                        CursorResult::IO => {
+                            break 'd Some((index_cursor_id, table_cursor_id));
+                        }
+                        CursorResult::Ok(record) => record,
+                    };
+                    let record = record.as_mut().unwrap();
+                    let last_idx = record.get_values().len() - 1;
+                    record.parse_column(last_idx)?;
                     let rowid = record.get_values().last().unwrap();
                     match rowid.as_ref().unwrap() {
                         RefValue::Integer(rowid) => *rowid,
@@ -2238,9 +2247,9 @@ pub fn op_idx_ge(
         let mut cursor = state.get_cursor(*cursor_id);
         let cursor = cursor.as_btree_mut();
         let record_from_regs = make_record(&state.registers, start_reg, num_regs);
+        #[cfg(not(feature = "lazy_parsing"))]
         let pc = if let Some(idx_record) = return_if_io!(cursor.record()) {
             // Compare against the same number of values
-            #[cfg(not(feature = "lazy_parsing"))]
             let ord = {
                 let idx_values = idx_record.get_values();
                 let idx_values = &idx_values[..record_from_regs.len()];
@@ -2252,11 +2261,27 @@ pub fn op_idx_ge(
                     cursor.collations(),
                 )
             };
-            
-            #[cfg(feature = "lazy_parsing")]
+            if ord.is_ge() {
+                target_pc.to_offset_int()
+            } else {
+                state.pc + 1
+            }
+        } else {
+            state.pc + 1
+        };
+        
+        #[cfg(feature = "lazy_parsing")]
+        let pc = if let Some(mut idx_record) = return_if_io!(cursor.record_mut()) {
+            // Compare against the same number of values
             let ord = {
+                // Ensure required columns are parsed
+                let cmp_len = record_from_regs.len();
+                for i in 0..cmp_len {
+                    let _ = idx_record.parse_column(i);
+                }
+                
                 let idx_values = idx_record.get_values();
-                let idx_parsed: Vec<RefValue> = idx_values[..record_from_regs.len()]
+                let idx_parsed: Vec<RefValue> = idx_values[..cmp_len]
                     .iter()
                     .filter_map(|opt| opt.as_ref())
                     .cloned()
@@ -2327,9 +2352,9 @@ pub fn op_idx_le(
         let mut cursor = state.get_cursor(*cursor_id);
         let cursor = cursor.as_btree_mut();
         let record_from_regs = make_record(&state.registers, start_reg, num_regs);
+        #[cfg(not(feature = "lazy_parsing"))]
         let pc = if let Some(ref idx_record) = return_if_io!(cursor.record()) {
             // Compare against the same number of values
-            #[cfg(not(feature = "lazy_parsing"))]
             let ord = {
                 let idx_values = idx_record.get_values();
                 let idx_values = &idx_values[..record_from_regs.len()];
@@ -2341,11 +2366,27 @@ pub fn op_idx_le(
                     cursor.collations(),
                 )
             };
-            
-            #[cfg(feature = "lazy_parsing")]
+            if ord.is_le() {
+                target_pc.to_offset_int()
+            } else {
+                state.pc + 1
+            }
+        } else {
+            target_pc.to_offset_int()
+        };
+        
+        #[cfg(feature = "lazy_parsing")]
+        let pc = if let Some(mut idx_record) = return_if_io!(cursor.record_mut()) {
+            // Compare against the same number of values
             let ord = {
+                // Ensure required columns are parsed
+                let cmp_len = record_from_regs.len();
+                for i in 0..cmp_len {
+                    let _ = idx_record.parse_column(i);
+                }
+                
                 let idx_values = idx_record.get_values();
-                let idx_parsed: Vec<RefValue> = idx_values[..record_from_regs.len()]
+                let idx_parsed: Vec<RefValue> = idx_values[..cmp_len]
                     .iter()
                     .filter_map(|opt| opt.as_ref())
                     .cloned()
@@ -2398,9 +2439,9 @@ pub fn op_idx_gt(
         let mut cursor = state.get_cursor(*cursor_id);
         let cursor = cursor.as_btree_mut();
         let record_from_regs = make_record(&state.registers, start_reg, num_regs);
+        #[cfg(not(feature = "lazy_parsing"))]
         let pc = if let Some(ref idx_record) = return_if_io!(cursor.record()) {
             // Compare against the same number of values
-            #[cfg(not(feature = "lazy_parsing"))]
             let ord = {
                 let idx_values = idx_record.get_values();
                 let idx_values = &idx_values[..record_from_regs.len()];
@@ -2412,11 +2453,27 @@ pub fn op_idx_gt(
                     cursor.collations(),
                 )
             };
-            
-            #[cfg(feature = "lazy_parsing")]
+            if ord.is_gt() {
+                target_pc.to_offset_int()
+            } else {
+                state.pc + 1
+            }
+        } else {
+            target_pc.to_offset_int()
+        };
+        
+        #[cfg(feature = "lazy_parsing")]
+        let pc = if let Some(mut idx_record) = return_if_io!(cursor.record_mut()) {
+            // Compare against the same number of values
             let ord = {
+                // Ensure required columns are parsed
+                let cmp_len = record_from_regs.len();
+                for i in 0..cmp_len {
+                    let _ = idx_record.parse_column(i);
+                }
+                
                 let idx_values = idx_record.get_values();
-                let idx_parsed: Vec<RefValue> = idx_values[..record_from_regs.len()]
+                let idx_parsed: Vec<RefValue> = idx_values[..cmp_len]
                     .iter()
                     .filter_map(|opt| opt.as_ref())
                     .cloned()
@@ -2469,9 +2526,9 @@ pub fn op_idx_lt(
         let mut cursor = state.get_cursor(*cursor_id);
         let cursor = cursor.as_btree_mut();
         let record_from_regs = make_record(&state.registers, start_reg, num_regs);
+        #[cfg(not(feature = "lazy_parsing"))]
         let pc = if let Some(ref idx_record) = return_if_io!(cursor.record()) {
             // Compare against the same number of values
-            #[cfg(not(feature = "lazy_parsing"))]
             let ord = {
                 let idx_values = idx_record.get_values();
                 let idx_values = &idx_values[..record_from_regs.len()];
@@ -2483,11 +2540,27 @@ pub fn op_idx_lt(
                     cursor.collations(),
                 )
             };
-            
-            #[cfg(feature = "lazy_parsing")]
+            if ord.is_lt() {
+                target_pc.to_offset_int()
+            } else {
+                state.pc + 1
+            }
+        } else {
+            target_pc.to_offset_int()
+        };
+        
+        #[cfg(feature = "lazy_parsing")]
+        let pc = if let Some(mut idx_record) = return_if_io!(cursor.record_mut()) {
+            // Compare against the same number of values
             let ord = {
+                // Ensure required columns are parsed
+                let cmp_len = record_from_regs.len();
+                for i in 0..cmp_len {
+                    let _ = idx_record.parse_column(i);
+                }
+                
                 let idx_values = idx_record.get_values();
-                let idx_parsed: Vec<RefValue> = idx_values[..record_from_regs.len()]
+                let idx_parsed: Vec<RefValue> = idx_values[..cmp_len]
                     .iter()
                     .filter_map(|opt| opt.as_ref())
                     .cloned()

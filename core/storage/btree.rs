@@ -598,7 +598,16 @@ impl BTreeCursor {
         if !self.has_rowid() {
             return None;
         }
+        #[cfg(not(feature = "lazy_parsing"))]
         let rowid = match self.get_immutable_record().as_ref().unwrap().last_value() {
+            Some(RefValue::Integer(rowid)) => *rowid as i64,
+            _ => unreachable!(
+                "index where has_rowid() is true should have an integer rowid as the last value"
+            ),
+        };
+        
+        #[cfg(feature = "lazy_parsing")]
+        let rowid = match self.get_immutable_record().as_mut().unwrap().last_value() {
             Some(RefValue::Integer(rowid)) => *rowid as i64,
             _ => unreachable!(
                 "index where has_rowid() is true should have an integer rowid as the last value"
@@ -1589,11 +1598,10 @@ impl BTreeCursor {
                     )?
                 };
                 let (target_leaf_page_is_in_left_subtree, is_eq) = {
-                    let record = self.get_immutable_record();
-                    let record = record.as_ref().unwrap();
-                    
                     #[cfg(not(feature = "lazy_parsing"))]
                     let interior_cell_vs_index_key = {
+                        let record = self.get_immutable_record();
+                        let record = record.as_ref().unwrap();
                         let record_slice_equal_number_of_cols =
                             &record.get_values().as_slice()[..index_key.get_values().len()];
                         compare_immutable(
@@ -1606,13 +1614,21 @@ impl BTreeCursor {
                     
                     #[cfg(feature = "lazy_parsing")]
                     let interior_cell_vs_index_key = {
-                        let index_key_values = index_key.get_values();
-                        let record_values: Vec<RefValue> = record.get_values()[..index_key_values.len()]
+                        let mut record_mut = self.get_immutable_record();
+                        let record = record_mut.as_mut().unwrap();
+                        
+                        // Ensure the required columns are parsed
+                        let index_key_len = index_key.get_values().len();
+                        for i in 0..index_key_len {
+                            let _ = record.parse_column(i);
+                        }
+                        
+                        let record_values: Vec<RefValue> = record.get_values()[..index_key_len]
                             .iter()
                             .filter_map(|opt| opt.as_ref())
                             .cloned()
                             .collect();
-                        let index_values: Vec<RefValue> = index_key_values
+                        let index_values: Vec<RefValue> = index_key.get_values()
                             .iter()
                             .filter_map(|opt| opt.as_ref())
                             .cloned()
@@ -2031,12 +2047,11 @@ impl BTreeCursor {
         seek_op: SeekOp,
     ) -> (Ordering, bool) {
         let cmp = {
-            let record = self.get_immutable_record();
-            let record = record.as_ref().unwrap();
-            tracing::debug!("record={}", record);
-            
             #[cfg(not(feature = "lazy_parsing"))]
             {
+                let record = self.get_immutable_record();
+                let record = record.as_ref().unwrap();
+                tracing::debug!("record={}", record);
                 let record_slice_equal_number_of_cols =
                     &record.get_values().as_slice()[..key.get_values().len()];
                 compare_immutable(
@@ -2049,6 +2064,16 @@ impl BTreeCursor {
             
             #[cfg(feature = "lazy_parsing")]
             {
+                let mut record_mut = self.get_immutable_record();
+                let record = record_mut.as_mut().unwrap();
+                tracing::debug!("record={}", record);
+                
+                // Ensure the required columns are parsed
+                let key_len = key.get_values().len();
+                for i in 0..key_len {
+                    let _ = record.parse_column(i);
+                }
+                
                 let key_values = key.get_values();
                 let record_values: Vec<RefValue> = record.get_values()[..key_values.len()]
                     .iter()
@@ -2223,10 +2248,17 @@ impl BTreeCursor {
                                 
                                 #[cfg(feature = "lazy_parsing")]
                                 let cmp = {
+                                    let mut cursor_record = self.get_immutable_record();
+                                    let cursor_record_ref = cursor_record.as_mut().unwrap();
+                                    
+                                    // Ensure all columns are parsed in cursor record
+                                    let num_cols = cursor_record_ref.get_values().len();
+                                    for i in 0..num_cols {
+                                        let _ = cursor_record_ref.parse_column(i);
+                                    }
+                                    
                                     let record_values = record.get_values();
-                                    let cursor_record = self.get_immutable_record();
-                                    let cursor_record = cursor_record.as_ref().unwrap();
-                                    let cursor_values = cursor_record.get_values();
+                                    let cursor_values = cursor_record_ref.get_values();
                                     
                                     let record_parsed: Vec<RefValue> = record_values
                                         .iter()
@@ -3981,8 +4013,15 @@ impl BTreeCursor {
                     #[cfg(feature = "lazy_parsing")]
                     let order = {
                         let key_values = key.to_index_key_values();
-                        let record = self.get_immutable_record();
-                        let record = record.as_ref().unwrap();
+                        let mut record_mut = self.get_immutable_record();
+                        let record = record_mut.as_mut().unwrap();
+                        
+                        // Ensure the required columns are parsed
+                        let key_len = key_values.len();
+                        for i in 0..key_len {
+                            let _ = record.parse_column(i);
+                        }
+                        
                         // Extract parsed values from the record for comparison
                         let record_values: Vec<RefValue> = record.get_values()[..key_values.len()]
                             .iter()
@@ -7031,9 +7070,29 @@ mod tests {
             for (i, key) in keys.iter().enumerate() {
                 tracing::info!("iterating key {}/{}: {:?}", i + 1, keys.len(), key);
                 run_until_done(|| cursor.next(), pager.deref()).unwrap();
-                let record = run_until_done(|| cursor.record(), &pager).unwrap();
-                let record = record.as_ref().unwrap();
-                let cur = record.get_values().clone();
+                
+                #[cfg(not(feature = "lazy_parsing"))]
+                let cur = {
+                    let record = run_until_done(|| cursor.record(), &pager).unwrap();
+                    let record = record.as_ref().unwrap();
+                    record.get_values().clone()
+                };
+                
+                #[cfg(feature = "lazy_parsing")]
+                let cur = {
+                    let mut record = run_until_done(|| cursor.record_mut(), &pager).unwrap();
+                    let record = record.as_mut().unwrap();
+                    // Parse all columns before comparison
+                    for i in 0..record.get_values().len() {
+                        let _ = record.parse_column(i);
+                    }
+                    // Now extract the parsed values
+                    record.get_values().iter()
+                        .filter_map(|opt| opt.as_ref())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                };
+                
                 if let Some(prev) = prev {
                     if prev >= cur {
                         println!("Seed: {}", seed);

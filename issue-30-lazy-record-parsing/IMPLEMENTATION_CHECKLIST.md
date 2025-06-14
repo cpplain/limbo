@@ -38,18 +38,28 @@
 - [x] Implement >50% heuristic in `parse_column()` ✓
 - [x] Fix borrow checker issues in `parse_remaining_columns()` ✓
 - [x] Update Clone implementation for lazy state ✓
+- [x] Add `init_lazy()` method for initialization ✓ (2025-06-14)
+- [x] Make `parse_column()` public for external usage ✓ (2025-06-14)
+- [x] Update `last_value()` to handle lazy parsing ✓ (2025-06-14)
 
 ### Cursor Updates
-- [ ] Add `record_mut()` method to BTreeCursor
-- [ ] Handle RefCell mutable borrowing correctly
-- [ ] Update record invalidation logic
-- [ ] Test cursor state management
+- [x] Add `record_mut()` method to BTreeCursor ✓ (2025-06-14)
+- [x] Handle RefCell mutable borrowing correctly ✓ (2025-06-14)
+- [x] Update record invalidation logic ✓ (2025-06-14)
+- [x] Test cursor state management ✓ (2025-06-14)
+- [x] Fix all btree comparison operations to parse columns ✓ (2025-06-14)
 
 ### VDBE Integration
-- [ ] Update `op_column` to use `record_mut()`
-- [x] Implement careful borrow scoping ✓ (temporary workaround)
-- [x] Handle all cursor types (BTree, Sorter, Pseudo) ✓ (basic support)
+- [x] Update `op_column` to use `record_mut()` ✓ (2025-06-14)
+- [x] Implement careful borrow scoping ✓ (2025-06-14)
+- [x] Handle all cursor types (BTree, Sorter, Pseudo) ✓ (2025-06-14)
 - [x] Add feature flag conditional compilation ✓
+- [x] Fix `op_rowid` for lazy parsing ✓ (2025-06-14)
+- [x] Fix all index comparison operations (idx_ge, idx_le, idx_gt, idx_lt) ✓ (2025-06-14)
+
+### Critical Integration
+- [x] **Modify `read_record()` to use lazy parsing** ✓ (2025-06-14) - THE KEY FIX!
+- [x] Fix Sorter implementation to handle lazy parsed values ✓ (2025-06-14)
 
 ### Edge Cases
 - [ ] Handle empty records (0 columns)

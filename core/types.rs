@@ -888,6 +888,15 @@ impl ImmutableRecord {
         }
     }
 
+    #[cfg(feature = "lazy_parsing")]
+    pub fn init_lazy(&mut self, payload: &[u8], lazy_state: LazyParseState) {
+        let column_count = lazy_state.column_count as usize;
+        self.payload = payload.to_vec();
+        self.values = vec![None; column_count];
+        self.recreating = false;
+        self.lazy_state = Some(lazy_state);
+    }
+
     #[cfg(not(feature = "lazy_parsing"))]
     pub fn get<'a, T: TryFrom<&'a RefValue, Error = LimboError> + 'a>(
         &'a self,
@@ -928,7 +937,10 @@ impl ImmutableRecord {
     }
     
     #[cfg(feature = "lazy_parsing")]
-    pub fn last_value(&self) -> Option<&RefValue> {
+    pub fn last_value(&mut self) -> Option<&RefValue> {
+        if let Some(last_idx) = self.values.len().checked_sub(1) {
+            let _ = self.parse_column(last_idx);
+        }
         self.values.last().and_then(|opt| opt.as_ref())
     }
 
@@ -1159,7 +1171,7 @@ impl ImmutableRecord {
     }
 
     #[cfg(feature = "lazy_parsing")]
-    fn parse_column(&mut self, column: usize) -> Result<()> {
+    pub fn parse_column(&mut self, column: usize) -> Result<()> {
         if let Some(ref mut lazy_state) = self.lazy_state {
             // Check if already parsed
             if lazy_state.parsed_mask.is_parsed(column) {

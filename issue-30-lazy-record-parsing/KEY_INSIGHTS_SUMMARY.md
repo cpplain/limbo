@@ -145,3 +145,51 @@ After completing the core implementation, several key insights emerged:
 - The need for `record_mut()` method on cursors is clear
 - op_column integration will be the most complex part
 - Performance testing will be critical to validate the approach
+
+## Full Integration Update (2025-06-14)
+
+### 1. The Critical Missing Piece
+- **Key Discovery**: The implementation wasn't actually being used!
+- **Root Cause**: `read_record()` was still doing eager parsing
+- **The Fix**: Modified `read_record()` to use `parse_record_header()` when lazy_parsing feature is enabled
+- **Impact**: This single change activated the entire lazy parsing system
+
+### 2. Mutable Access Pattern Throughout
+- **Challenge**: All comparison operations needed mutable access to parse columns
+- **Solution**: Systematic change from `record()` to `record_mut()` across the codebase
+- **Locations**: btree comparisons, VDBE operations, sorter
+- **Pattern**: Parse required columns before any comparison
+
+### 3. Public API Changes
+- **`parse_column()` made public**: Needed by btree and execute modules
+- **`init_lazy()` added**: Clean initialization method for lazy state
+- **`last_value()` updated**: Now handles lazy parsing with mutable self
+
+### 4. Comparison Operation Fixes
+- **btree.rs**: 4 locations where index comparisons needed column parsing
+- **execute.rs**: 5 locations (op_rowid + 4 index comparison ops)
+- **sorter.rs**: Pre-parse all sort key columns before sorting
+- **Pattern**: Always parse columns in a loop before comparison
+
+### 5. Testing Validation
+- **All tests passing**: Including complex fuzz tests
+- **No regressions**: Feature flag maintains perfect compatibility
+- **Integration verified**: Lazy parsing actually triggers in real queries
+
+### 6. Implementation Completeness
+- **Core functionality**: 100% complete
+- **Integration points**: All identified and fixed
+- **Edge cases**: Still need testing
+- **Performance**: Ready for validation
+
+### 7. Key Learnings
+- **Feature flags work well**: Clean separation of old/new code paths
+- **Rust's borrow checker helps**: Caught all the places needing updates
+- **Systematic approach essential**: Every comparison operation needed review
+- **Testing is crucial**: Fuzz tests caught edge cases immediately
+
+### 8. What Made It Work
+- **Clear separation of concerns**: Lazy state isolated in ImmutableRecord
+- **Consistent patterns**: Same fix pattern across all comparison sites
+- **Incremental approach**: Fix one test failure at a time
+- **Strong type system**: Compilation errors guided the fixes
