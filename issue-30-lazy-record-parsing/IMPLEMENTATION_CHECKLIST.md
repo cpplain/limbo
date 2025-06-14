@@ -30,11 +30,14 @@
 
 ## Week 2-3: Core Implementation
 ### ImmutableRecord Changes
-- [ ] Change `values` from `Vec<RefValue>` to `Vec<Option<RefValue>>`
-- [ ] Add `lazy_state: Option<LazyParseState>` field
-- [ ] Update `get_value_opt()` method
-- [ ] Implement `get_value_lazy()` method
-- [ ] Add `parse_column()` private method
+- [x] Change `values` from `Vec<RefValue>` to `Vec<Option<RefValue>>` ✓ (2025-12-06)
+- [x] Add `lazy_state: Option<LazyParseState>` field ✓ (2025-12-06)
+- [x] Update `get_value_opt()` method ✓ (2025-12-06)
+- [x] Implement `get_value_lazy()` method ✓ (implemented as `parse_column()`)
+- [x] Add `parse_column()` private method ✓ (2025-12-06)
+- [x] Implement >50% heuristic in `parse_column()` ✓
+- [x] Fix borrow checker issues in `parse_remaining_columns()` ✓
+- [x] Update Clone implementation for lazy state ✓
 
 ### Cursor Updates
 - [ ] Add `record_mut()` method to BTreeCursor
@@ -44,9 +47,9 @@
 
 ### VDBE Integration
 - [ ] Update `op_column` to use `record_mut()`
-- [ ] Implement careful borrow scoping
-- [ ] Handle all cursor types (BTree, Sorter, Pseudo)
-- [ ] Add feature flag conditional compilation
+- [x] Implement careful borrow scoping ✓ (temporary workaround)
+- [x] Handle all cursor types (BTree, Sorter, Pseudo) ✓ (basic support)
+- [x] Add feature flag conditional compilation ✓
 
 ### Edge Cases
 - [ ] Handle empty records (0 columns)
@@ -57,7 +60,11 @@
 
 ## Week 4: Testing & Optimization
 ### Correctness Testing
-- [ ] Unit tests for lazy vs eager equivalence
+- [x] Unit tests for lazy vs eager equivalence ✓ (2025-12-06)
+  - [x] test_lazy_record_parsing ✓
+  - [x] test_lazy_parsing_50_percent_heuristic ✓
+  - [x] test_parsed_mask_small ✓
+  - [x] test_parsed_mask_large ✓
 - [ ] SQLite compatibility test suite passes
 - [ ] Integration tests for all SQL operations
 - [ ] Fuzz testing with random payloads

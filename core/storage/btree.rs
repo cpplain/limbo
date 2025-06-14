@@ -281,10 +281,27 @@ impl BTreeKey<'_> {
     }
 
     /// Assert that the key is an index key and return it.
+    #[cfg(not(feature = "lazy_parsing"))]
     fn to_index_key_values(&self) -> &'_ Vec<RefValue> {
         match self {
             BTreeKey::TableRowId(_) => panic!("BTreeKey::to_index_key called on TableRowId"),
             BTreeKey::IndexKey(key) => key.get_values(),
+        }
+    }
+    
+    #[cfg(feature = "lazy_parsing")]
+    fn to_index_key_values(&self) -> Vec<RefValue> {
+        match self {
+            BTreeKey::TableRowId(_) => panic!("BTreeKey::to_index_key called on TableRowId"),
+            BTreeKey::IndexKey(key) => {
+                // For index keys, we need to ensure all values are parsed
+                // This is safe because index keys should always have all values available
+                key.get_values()
+                    .iter()
+                    .filter_map(|opt| opt.as_ref())
+                    .cloned()
+                    .collect()
+            }
         }
     }
 }
@@ -1571,14 +1588,39 @@ impl BTreeCursor {
                 let (target_leaf_page_is_in_left_subtree, is_eq) = {
                     let record = self.get_immutable_record();
                     let record = record.as_ref().unwrap();
-                    let record_slice_equal_number_of_cols =
-                        &record.get_values().as_slice()[..index_key.get_values().len()];
-                    let interior_cell_vs_index_key = compare_immutable(
-                        record_slice_equal_number_of_cols,
-                        index_key.get_values(),
-                        self.key_sort_order(),
-                        &self.collations,
-                    );
+                    
+                    #[cfg(not(feature = "lazy_parsing"))]
+                    let interior_cell_vs_index_key = {
+                        let record_slice_equal_number_of_cols =
+                            &record.get_values().as_slice()[..index_key.get_values().len()];
+                        compare_immutable(
+                            record_slice_equal_number_of_cols,
+                            index_key.get_values(),
+                            self.key_sort_order(),
+                            &self.collations,
+                        )
+                    };
+                    
+                    #[cfg(feature = "lazy_parsing")]
+                    let interior_cell_vs_index_key = {
+                        let index_key_values = index_key.get_values();
+                        let record_values: Vec<RefValue> = record.get_values()[..index_key_values.len()]
+                            .iter()
+                            .filter_map(|opt| opt.as_ref())
+                            .cloned()
+                            .collect();
+                        let index_values: Vec<RefValue> = index_key_values
+                            .iter()
+                            .filter_map(|opt| opt.as_ref())
+                            .cloned()
+                            .collect();
+                        compare_immutable(
+                            &record_values,
+                            &index_values,
+                            self.key_sort_order(),
+                            &self.collations,
+                        )
+                    };
                     // in sqlite btrees left child pages have <= keys.
                     // in general, in forwards iteration we want to find the first key that matches the seek condition.
                     // in backwards iteration we want to find the last key that matches the seek condition.
@@ -1989,14 +2031,39 @@ impl BTreeCursor {
             let record = self.get_immutable_record();
             let record = record.as_ref().unwrap();
             tracing::debug!("record={}", record);
-            let record_slice_equal_number_of_cols =
-                &record.get_values().as_slice()[..key.get_values().len()];
-            compare_immutable(
-                record_slice_equal_number_of_cols,
-                key.get_values(),
-                self.key_sort_order(),
-                &self.collations,
-            )
+            
+            #[cfg(not(feature = "lazy_parsing"))]
+            {
+                let record_slice_equal_number_of_cols =
+                    &record.get_values().as_slice()[..key.get_values().len()];
+                compare_immutable(
+                    record_slice_equal_number_of_cols,
+                    key.get_values(),
+                    self.key_sort_order(),
+                    &self.collations,
+                )
+            }
+            
+            #[cfg(feature = "lazy_parsing")]
+            {
+                let key_values = key.get_values();
+                let record_values: Vec<RefValue> = record.get_values()[..key_values.len()]
+                    .iter()
+                    .filter_map(|opt| opt.as_ref())
+                    .cloned()
+                    .collect();
+                let key_parsed_values: Vec<RefValue> = key_values
+                    .iter()
+                    .filter_map(|opt| opt.as_ref())
+                    .cloned()
+                    .collect();
+                compare_immutable(
+                    &record_values,
+                    &key_parsed_values,
+                    self.key_sort_order(),
+                    &self.collations,
+                )
+            }
         };
         let found = match seek_op {
             SeekOp::GT => cmp.is_gt(),
@@ -2140,6 +2207,7 @@ impl BTreeCursor {
                             }
                             BTreeCell::IndexLeafCell(..) => {
                                 // Not necessary to read record again here, as find_cell already does that for us
+                                #[cfg(not(feature = "lazy_parsing"))]
                                 let cmp = compare_immutable(
                                     record.get_values(),
                                     self.get_immutable_record()
@@ -2149,6 +2217,32 @@ impl BTreeCursor {
                                         self.key_sort_order(),
                                         &self.collations,
                                 );
+                                
+                                #[cfg(feature = "lazy_parsing")]
+                                let cmp = {
+                                    let record_values = record.get_values();
+                                    let cursor_record = self.get_immutable_record();
+                                    let cursor_record = cursor_record.as_ref().unwrap();
+                                    let cursor_values = cursor_record.get_values();
+                                    
+                                    let record_parsed: Vec<RefValue> = record_values
+                                        .iter()
+                                        .filter_map(|opt| opt.as_ref())
+                                        .cloned()
+                                        .collect();
+                                    let cursor_parsed: Vec<RefValue> = cursor_values
+                                        .iter()
+                                        .filter_map(|opt| opt.as_ref())
+                                        .cloned()
+                                        .collect();
+                                    
+                                    compare_immutable(
+                                        &record_parsed,
+                                        &cursor_parsed,
+                                        self.key_sort_order(),
+                                        &self.collations,
+                                    )
+                                };
                                 if cmp == Ordering::Equal {
                                     tracing::debug!("insert_into_page: found exact match with cell_idx={cell_idx}, overwriting");
                                     self.has_record.set(true);
@@ -3867,16 +3961,38 @@ impl BTreeCursor {
                         first_overflow_page,
                         payload_size,
                     ));
-                    let key_values = key.to_index_key_values();
-                    let record = self.get_immutable_record();
-                    let record = record.as_ref().unwrap();
-                    let record_same_number_cols = &record.get_values()[..key_values.len()];
-                    let order = compare_immutable(
-                        key_values,
-                        record_same_number_cols,
-                        self.key_sort_order(),
-                        &self.collations,
-                    );
+                    #[cfg(not(feature = "lazy_parsing"))]
+                    let order = {
+                        let key_values = key.to_index_key_values();
+                        let record = self.get_immutable_record();
+                        let record = record.as_ref().unwrap();
+                        let record_same_number_cols = &record.get_values()[..key_values.len()];
+                        compare_immutable(
+                            key_values,
+                            record_same_number_cols,
+                            self.key_sort_order(),
+                            &self.collations,
+                        )
+                    };
+                    
+                    #[cfg(feature = "lazy_parsing")]
+                    let order = {
+                        let key_values = key.to_index_key_values();
+                        let record = self.get_immutable_record();
+                        let record = record.as_ref().unwrap();
+                        // Extract parsed values from the record for comparison
+                        let record_values: Vec<RefValue> = record.get_values()[..key_values.len()]
+                            .iter()
+                            .filter_map(|opt| opt.as_ref())
+                            .cloned()
+                            .collect();
+                        compare_immutable(
+                            &key_values,
+                            &record_values,
+                            self.key_sort_order(),
+                            &self.collations,
+                        )
+                    };
                     match order {
                         Ordering::Less | Ordering::Equal => {
                             break;

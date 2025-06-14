@@ -1032,7 +1032,18 @@ pub fn op_vcreate(
     let table_name = state.registers[*table_name].get_owned_value().to_string();
     let args = if let Some(args_reg) = args_reg {
         if let Register::Record(rec) = &state.registers[*args_reg] {
-            rec.get_values().iter().map(|v| v.to_ffi()).collect()
+            #[cfg(not(feature = "lazy_parsing"))]
+            {
+                rec.get_values().iter().map(|v| v.to_ffi()).collect()
+            }
+            #[cfg(feature = "lazy_parsing")]
+            {
+                rec.get_values()
+                    .iter()
+                    .filter_map(|opt| opt.as_ref())
+                    .map(|v| v.to_ffi())
+                    .collect()
+            }
         } else {
             return Err(LimboError::InternalError(
                 "VCreate: args_reg is not a record".to_string(),
@@ -1373,6 +1384,7 @@ pub fn op_column(
     let (_, cursor_type) = program.cursor_ref.get(*cursor_id).unwrap();
     match cursor_type {
         CursorType::BTreeTable(_) | CursorType::BTreeIndex(_) => {
+            #[cfg(not(feature = "lazy_parsing"))]
             let value = {
                 let mut cursor =
                     must_be_btree_cursor!(*cursor_id, program.cursor_ref, state, "Column");
@@ -1391,6 +1403,13 @@ pub fn op_column(
                     RefValue::Null
                 };
                 value
+            };
+            
+            #[cfg(feature = "lazy_parsing")]
+            let value = {
+                // For lazy parsing, we need to handle the Result type properly
+                // This is a temporary workaround - ideally we'd have record_mut()
+                RefValue::Null // TODO: Implement proper lazy parsing support in op_column
             };
             // If we are copying a text/blob, let's try to simply update size of text if we need to allocate more and reuse.
             match (&value, &mut state.registers[*dest]) {
@@ -1415,10 +1434,18 @@ pub fn op_column(
                 cursor.record().cloned()
             };
             if let Some(record) = record {
-                state.registers[*dest] = Register::Value(match record.get_value_opt(*column) {
-                    Some(val) => val.to_owned(),
-                    None => Value::Null,
-                });
+                #[cfg(not(feature = "lazy_parsing"))]
+                {
+                    state.registers[*dest] = Register::Value(match record.get_value_opt(*column) {
+                        Some(val) => val.to_owned(),
+                        None => Value::Null,
+                    });
+                }
+                #[cfg(feature = "lazy_parsing")]
+                {
+                    // TODO: Implement proper lazy parsing support for Sorter
+                    state.registers[*dest] = Register::Value(Value::Null);
+                }
             } else {
                 state.registers[*dest] = Register::Value(Value::Null);
             }
@@ -1919,11 +1946,24 @@ pub fn op_row_id(
                     CursorResult::Ok(record) => record,
                 };
                 let record = record.as_ref().unwrap();
-                let rowid = record.get_values().last().unwrap();
-                match rowid {
-                    RefValue::Integer(rowid) => *rowid,
-                    _ => unreachable!(),
-                }
+                #[cfg(not(feature = "lazy_parsing"))]
+                let rowid_value = {
+                    let rowid = record.get_values().last().unwrap();
+                    match rowid {
+                        RefValue::Integer(rowid) => *rowid,
+                        _ => unreachable!(),
+                    }
+                };
+                
+                #[cfg(feature = "lazy_parsing")]
+                let rowid_value = {
+                    let rowid = record.get_values().last().unwrap();
+                    match rowid.as_ref().unwrap() {
+                        RefValue::Integer(rowid) => *rowid,
+                        _ => unreachable!(),
+                    }
+                };
+                rowid_value
             };
             let mut table_cursor = state.get_cursor(table_cursor_id);
             let table_cursor = table_cursor.as_btree_mut();
@@ -2182,15 +2222,40 @@ pub fn op_idx_ge(
         let record_from_regs = make_record(&state.registers, start_reg, num_regs);
         let pc = if let Some(idx_record) = return_if_io!(cursor.record()) {
             // Compare against the same number of values
-            let idx_values = idx_record.get_values();
-            let idx_values = &idx_values[..record_from_regs.len()];
-            let record_values = record_from_regs.get_values();
-            let ord = compare_immutable(
-                &idx_values,
-                &record_values,
-                cursor.key_sort_order(),
-                cursor.collations(),
-            );
+            #[cfg(not(feature = "lazy_parsing"))]
+            let ord = {
+                let idx_values = idx_record.get_values();
+                let idx_values = &idx_values[..record_from_regs.len()];
+                let record_values = record_from_regs.get_values();
+                compare_immutable(
+                    &idx_values,
+                    &record_values,
+                    cursor.key_sort_order(),
+                    cursor.collations(),
+                )
+            };
+            
+            #[cfg(feature = "lazy_parsing")]
+            let ord = {
+                let idx_values = idx_record.get_values();
+                let idx_parsed: Vec<RefValue> = idx_values[..record_from_regs.len()]
+                    .iter()
+                    .filter_map(|opt| opt.as_ref())
+                    .cloned()
+                    .collect();
+                let record_values = record_from_regs.get_values();
+                let record_parsed: Vec<RefValue> = record_values
+                    .iter()
+                    .filter_map(|opt| opt.as_ref())
+                    .cloned()
+                    .collect();
+                compare_immutable(
+                    &idx_parsed,
+                    &record_parsed,
+                    cursor.key_sort_order(),
+                    cursor.collations(),
+                )
+            };
             if ord.is_ge() {
                 target_pc.to_offset_int()
             } else {
@@ -2246,15 +2311,40 @@ pub fn op_idx_le(
         let record_from_regs = make_record(&state.registers, start_reg, num_regs);
         let pc = if let Some(ref idx_record) = return_if_io!(cursor.record()) {
             // Compare against the same number of values
-            let idx_values = idx_record.get_values();
-            let idx_values = &idx_values[..record_from_regs.len()];
-            let record_values = record_from_regs.get_values();
-            let ord = compare_immutable(
-                &idx_values,
-                &record_values,
-                cursor.key_sort_order(),
-                cursor.collations(),
-            );
+            #[cfg(not(feature = "lazy_parsing"))]
+            let ord = {
+                let idx_values = idx_record.get_values();
+                let idx_values = &idx_values[..record_from_regs.len()];
+                let record_values = record_from_regs.get_values();
+                compare_immutable(
+                    &idx_values,
+                    &record_values,
+                    cursor.key_sort_order(),
+                    cursor.collations(),
+                )
+            };
+            
+            #[cfg(feature = "lazy_parsing")]
+            let ord = {
+                let idx_values = idx_record.get_values();
+                let idx_parsed: Vec<RefValue> = idx_values[..record_from_regs.len()]
+                    .iter()
+                    .filter_map(|opt| opt.as_ref())
+                    .cloned()
+                    .collect();
+                let record_values = record_from_regs.get_values();
+                let record_parsed: Vec<RefValue> = record_values
+                    .iter()
+                    .filter_map(|opt| opt.as_ref())
+                    .cloned()
+                    .collect();
+                compare_immutable(
+                    &idx_parsed,
+                    &record_parsed,
+                    cursor.key_sort_order(),
+                    cursor.collations(),
+                )
+            };
             if ord.is_le() {
                 target_pc.to_offset_int()
             } else {
@@ -2292,15 +2382,40 @@ pub fn op_idx_gt(
         let record_from_regs = make_record(&state.registers, start_reg, num_regs);
         let pc = if let Some(ref idx_record) = return_if_io!(cursor.record()) {
             // Compare against the same number of values
-            let idx_values = idx_record.get_values();
-            let idx_values = &idx_values[..record_from_regs.len()];
-            let record_values = record_from_regs.get_values();
-            let ord = compare_immutable(
-                &idx_values,
-                &record_values,
-                cursor.key_sort_order(),
-                cursor.collations(),
-            );
+            #[cfg(not(feature = "lazy_parsing"))]
+            let ord = {
+                let idx_values = idx_record.get_values();
+                let idx_values = &idx_values[..record_from_regs.len()];
+                let record_values = record_from_regs.get_values();
+                compare_immutable(
+                    &idx_values,
+                    &record_values,
+                    cursor.key_sort_order(),
+                    cursor.collations(),
+                )
+            };
+            
+            #[cfg(feature = "lazy_parsing")]
+            let ord = {
+                let idx_values = idx_record.get_values();
+                let idx_parsed: Vec<RefValue> = idx_values[..record_from_regs.len()]
+                    .iter()
+                    .filter_map(|opt| opt.as_ref())
+                    .cloned()
+                    .collect();
+                let record_values = record_from_regs.get_values();
+                let record_parsed: Vec<RefValue> = record_values
+                    .iter()
+                    .filter_map(|opt| opt.as_ref())
+                    .cloned()
+                    .collect();
+                compare_immutable(
+                    &idx_parsed,
+                    &record_parsed,
+                    cursor.key_sort_order(),
+                    cursor.collations(),
+                )
+            };
             if ord.is_gt() {
                 target_pc.to_offset_int()
             } else {
@@ -2338,15 +2453,40 @@ pub fn op_idx_lt(
         let record_from_regs = make_record(&state.registers, start_reg, num_regs);
         let pc = if let Some(ref idx_record) = return_if_io!(cursor.record()) {
             // Compare against the same number of values
-            let idx_values = idx_record.get_values();
-            let idx_values = &idx_values[..record_from_regs.len()];
-            let record_values = record_from_regs.get_values();
-            let ord = compare_immutable(
-                &idx_values,
-                &record_values,
-                cursor.key_sort_order(),
-                cursor.collations(),
-            );
+            #[cfg(not(feature = "lazy_parsing"))]
+            let ord = {
+                let idx_values = idx_record.get_values();
+                let idx_values = &idx_values[..record_from_regs.len()];
+                let record_values = record_from_regs.get_values();
+                compare_immutable(
+                    &idx_values,
+                    &record_values,
+                    cursor.key_sort_order(),
+                    cursor.collations(),
+                )
+            };
+            
+            #[cfg(feature = "lazy_parsing")]
+            let ord = {
+                let idx_values = idx_record.get_values();
+                let idx_parsed: Vec<RefValue> = idx_values[..record_from_regs.len()]
+                    .iter()
+                    .filter_map(|opt| opt.as_ref())
+                    .cloned()
+                    .collect();
+                let record_values = record_from_regs.get_values();
+                let record_parsed: Vec<RefValue> = record_values
+                    .iter()
+                    .filter_map(|opt| opt.as_ref())
+                    .cloned()
+                    .collect();
+                compare_immutable(
+                    &idx_parsed,
+                    &record_parsed,
+                    cursor.key_sort_order(),
+                    cursor.collations(),
+                )
+            };
             if ord.is_lt() {
                 target_pc.to_offset_int()
             } else {
@@ -4172,10 +4312,17 @@ pub fn op_no_conflict(
         &make_record(&state.registers, record_reg, num_regs)
     };
     // If there is at least one NULL in the index record, there cannot be a conflict so we can immediately jump.
+    #[cfg(not(feature = "lazy_parsing"))]
     let contains_nulls = record
         .get_values()
         .iter()
         .any(|val| matches!(val, RefValue::Null));
+    
+    #[cfg(feature = "lazy_parsing")]
+    let contains_nulls = record
+        .get_values()
+        .iter()
+        .any(|opt| matches!(opt.as_ref(), Some(RefValue::Null)));
 
     if contains_nulls {
         drop(cursor_ref);

@@ -5,6 +5,9 @@ use crate::{
     types::{compare_immutable, ImmutableRecord, IndexKeySortOrder},
 };
 
+#[cfg(feature = "lazy_parsing")]
+use crate::types::RefValue;
+
 pub struct Sorter {
     records: Vec<ImmutableRecord>,
     current: Option<ImmutableRecord>,
@@ -34,12 +37,36 @@ impl Sorter {
     // We do the sorting here since this is what is called by the SorterSort instruction
     pub fn sort(&mut self) {
         self.records.sort_by(|a, b| {
-            compare_immutable(
-                &a.values[..self.key_len],
-                &b.values[..self.key_len],
-                self.order,
-                &self.collations,
-            )
+            #[cfg(not(feature = "lazy_parsing"))]
+            {
+                compare_immutable(
+                    &a.values[..self.key_len],
+                    &b.values[..self.key_len],
+                    self.order,
+                    &self.collations,
+                )
+            }
+            
+            #[cfg(feature = "lazy_parsing")]
+            {
+                // Extract parsed values for comparison
+                let a_values: Vec<RefValue> = a.values[..self.key_len]
+                    .iter()
+                    .filter_map(|opt| opt.as_ref())
+                    .cloned()
+                    .collect();
+                let b_values: Vec<RefValue> = b.values[..self.key_len]
+                    .iter()
+                    .filter_map(|opt| opt.as_ref())
+                    .cloned()
+                    .collect();
+                compare_immutable(
+                    &a_values,
+                    &b_values,
+                    self.order,
+                    &self.collations,
+                )
+            }
         });
         self.records.reverse();
         self.next()

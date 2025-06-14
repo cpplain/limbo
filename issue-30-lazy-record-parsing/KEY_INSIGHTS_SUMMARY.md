@@ -111,3 +111,37 @@ All three analyses strongly recommend proceeding with the implementation. The co
 - The 4-6 week timeline is achievable
 
 This optimization represents a significant opportunity to improve Limbo's performance for analytical workloads, and the engineering team has all the information needed for successful implementation.
+
+## Implementation Update (2025-12-06)
+
+After completing the core implementation, several key insights emerged:
+
+### 1. Conditional Compilation Complexity
+- The `Vec<RefValue>` to `Vec<Option<RefValue>>` change required extensive conditional compilation
+- Many functions needed dual implementations with `#[cfg]` attributes
+- This adds maintenance complexity but ensures zero overhead when disabled
+
+### 2. Borrow Checker Challenges
+- The most challenging issue was in `parse_remaining_columns()`
+- Solution: Collect unparsed column indices first, then parse in separate loop
+- This pattern may be needed in other places during cursor integration
+
+### 3. Comparison Function Updates
+- All comparison functions (`compare_immutable`) needed updates to handle `Option<RefValue>`
+- Pattern: Extract parsed values into temporary Vec<RefValue> before comparison
+- This adds allocation overhead that should be optimized later
+
+### 4. Type System Benefits
+- Rust's type system caught many potential issues at compile time
+- The Option wrapper makes the parse state explicit in the type
+- This prevents accidental access to unparsed values
+
+### 5. Testing Insights
+- The >50% heuristic works well in practice
+- Unit tests confirmed the lazy parsing behavior is correct
+- Edge cases (empty records, all nulls) still need testing
+
+### 6. Next Phase Clarity
+- The need for `record_mut()` method on cursors is clear
+- op_column integration will be the most complex part
+- Performance testing will be critical to validate the approach

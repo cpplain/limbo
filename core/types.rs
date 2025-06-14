@@ -8,6 +8,8 @@ use crate::ext::{ExtValue, ExtValueType};
 use crate::pseudo::PseudoCursor;
 use crate::schema::Index;
 use crate::storage::btree::BTreeCursor;
+#[cfg(feature = "lazy_parsing")]
+use crate::storage::sqlite3_ondisk::read_value;
 use crate::storage::sqlite3_ondisk::write_varint;
 use crate::translate::collate::CollationSeq;
 use crate::translate::plan::IterationDirection;
@@ -697,8 +699,13 @@ pub struct ImmutableRecord {
     // happen in a controlled manner. If we realocate with values that should be correct, they will now point to undefined data.
     // We don't use pin here because it would make it imposible to reuse the buffer if we need to push a new record in the same struct.
     payload: Vec<u8>,
+    #[cfg(not(feature = "lazy_parsing"))]
     pub values: Vec<RefValue>,
+    #[cfg(feature = "lazy_parsing")]
+    pub values: Vec<Option<RefValue>>,
     recreating: bool,
+    #[cfg(feature = "lazy_parsing")]
+    lazy_state: Option<LazyParseState>,
 }
 
 #[derive(PartialEq)]
@@ -708,7 +715,7 @@ pub enum ParseRecordState {
 }
 
 #[cfg(feature = "lazy_parsing")]
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ParsedMask {
     /// Bitmask for ≤64 columns  
     Small(u64),
@@ -718,6 +725,14 @@ pub enum ParsedMask {
 
 #[cfg(feature = "lazy_parsing")]
 impl ParsedMask {
+    pub fn new(column_count: u16) -> Self {
+        if column_count <= 64 {
+            ParsedMask::Small(0)
+        } else {
+            let num_u64s = (column_count as usize + 63) / 64;
+            ParsedMask::Large(vec![0; num_u64s])
+        }
+    }
     /// Check if a column at the given index has been parsed
     pub fn is_parsed(&self, idx: usize) -> bool {
         match self {
@@ -774,7 +789,7 @@ impl ParsedMask {
 }
 
 #[cfg(feature = "lazy_parsing")]
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LazyParseState {
     /// Serial types for each column
     pub serial_types: Vec<u64>,
@@ -857,9 +872,23 @@ impl ImmutableRecord {
             payload: Vec::with_capacity(payload_capacity),
             values: Vec::with_capacity(value_capacity),
             recreating: false,
+            #[cfg(feature = "lazy_parsing")]
+            lazy_state: None,
         }
     }
 
+    #[cfg(feature = "lazy_parsing")]
+    pub fn new_lazy(payload: Vec<u8>, lazy_state: LazyParseState) -> Self {
+        let column_count = lazy_state.column_count as usize;
+        Self {
+            payload,
+            values: vec![None; column_count],
+            recreating: false,
+            lazy_state: Some(lazy_state),
+        }
+    }
+
+    #[cfg(not(feature = "lazy_parsing"))]
     pub fn get<'a, T: TryFrom<&'a RefValue, Error = LimboError> + 'a>(
         &'a self,
         idx: usize,
@@ -870,25 +899,101 @@ impl ImmutableRecord {
             .ok_or(LimboError::InternalError("Index out of bounds".into()))?;
         T::try_from(value)
     }
+    
+    #[cfg(feature = "lazy_parsing")]
+    pub fn get<'a, T: TryFrom<&'a RefValue, Error = LimboError> + 'a>(
+        &'a mut self,
+        idx: usize,
+    ) -> Result<T> {
+        // Ensure column is parsed
+        if self.lazy_state.is_some() {
+            self.parse_column(idx)?;
+        }
+        
+        let value = self
+            .values
+            .get(idx)
+            .and_then(|opt| opt.as_ref())
+            .ok_or(LimboError::InternalError("Index out of bounds".into()))?;
+        T::try_from(value)
+    }
 
     pub fn count(&self) -> usize {
         self.values.len()
     }
 
+    #[cfg(not(feature = "lazy_parsing"))]
     pub fn last_value(&self) -> Option<&RefValue> {
         self.values.last()
     }
+    
+    #[cfg(feature = "lazy_parsing")]
+    pub fn last_value(&self) -> Option<&RefValue> {
+        self.values.last().and_then(|opt| opt.as_ref())
+    }
 
+    #[cfg(not(feature = "lazy_parsing"))]
     pub fn get_values(&self) -> &Vec<RefValue> {
         &self.values
     }
+    
+    #[cfg(feature = "lazy_parsing")]
+    pub fn get_values(&self) -> &Vec<Option<RefValue>> {
+        &self.values
+    }
+    
+    // Compatibility method that works with both feature flags
+    #[cfg(not(feature = "lazy_parsing"))]
+    pub fn get_values_for_comparison(&self) -> &[RefValue] {
+        &self.values
+    }
+    
+    #[cfg(feature = "lazy_parsing")]
+    pub fn get_parsed_values(&mut self) -> Vec<RefValue> {
+        // Ensure all columns are parsed
+        if self.lazy_state.is_some() {
+            let column_count = self.values.len();
+            for i in 0..column_count {
+                let _ = self.parse_column(i);
+            }
+        }
+        
+        // Return a vector of parsed values
+        self.values.iter()
+            .filter_map(|opt| opt.as_ref())
+            .cloned()
+            .collect()
+    }
+    
+    #[cfg(feature = "lazy_parsing")]
+    pub fn get_parsed_values_slice(&mut self) -> Vec<RefValue> {
+        self.get_parsed_values()
+    }
 
+    #[cfg(not(feature = "lazy_parsing"))]
     pub fn get_value(&self, idx: usize) -> &RefValue {
         &self.values[idx]
     }
+    
+    #[cfg(feature = "lazy_parsing")]
+    pub fn get_value(&self, idx: usize) -> &RefValue {
+        self.values[idx].as_ref().expect("Column not parsed")
+    }
 
+    #[cfg(not(feature = "lazy_parsing"))]
     pub fn get_value_opt(&self, idx: usize) -> Option<&RefValue> {
         self.values.get(idx)
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    pub fn get_value_opt(&mut self, idx: usize) -> Result<Option<RefValue>> {
+        // First ensure the column is parsed if we're doing lazy parsing
+        if self.lazy_state.is_some() && idx < self.values.len() {
+            self.parse_column(idx)?;
+        }
+        
+        // Return the value if it exists
+        Ok(self.values.get(idx).and_then(|opt| opt.as_ref()).cloned())
     }
 
     pub fn len(&self) -> usize {
@@ -951,10 +1056,16 @@ impl ImmutableRecord {
             let start_offset = writer.pos;
             match value {
                 Value::Null => {
+                    #[cfg(not(feature = "lazy_parsing"))]
                     values.push(RefValue::Null);
+                    #[cfg(feature = "lazy_parsing")]
+                    values.push(Some(RefValue::Null));
                 }
                 Value::Integer(i) => {
+                    #[cfg(not(feature = "lazy_parsing"))]
                     values.push(RefValue::Integer(*i));
+                    #[cfg(feature = "lazy_parsing")]
+                    values.push(Some(RefValue::Integer(*i)));
                     let serial_type = SerialType::from(value);
                     match serial_type.kind() {
                         SerialTypeKind::ConstInt0 | SerialTypeKind::ConstInt1 => {}
@@ -970,7 +1081,10 @@ impl ImmutableRecord {
                     }
                 }
                 Value::Float(f) => {
+                    #[cfg(not(feature = "lazy_parsing"))]
                     values.push(RefValue::Float(*f));
+                    #[cfg(feature = "lazy_parsing")]
+                    values.push(Some(RefValue::Float(*f)));
                     writer.extend_from_slice(&f.to_be_bytes())
                 }
                 Value::Text(t) => {
@@ -982,14 +1096,20 @@ impl ImmutableRecord {
                         value: RawSlice::new(ptr, len),
                         subtype: t.subtype.clone(),
                     });
+                    #[cfg(not(feature = "lazy_parsing"))]
                     values.push(value);
+                    #[cfg(feature = "lazy_parsing")]
+                    values.push(Some(value));
                 }
                 Value::Blob(b) => {
                     writer.extend_from_slice(b);
                     let end_offset = writer.pos;
                     let len = end_offset - start_offset;
                     let ptr = unsafe { writer.buf.as_ptr().add(start_offset) };
+                    #[cfg(not(feature = "lazy_parsing"))]
                     values.push(RefValue::Blob(RawSlice::new(ptr, len)));
+                    #[cfg(feature = "lazy_parsing")]
+                    values.push(Some(RefValue::Blob(RawSlice::new(ptr, len))));
                 }
             };
         }
@@ -999,6 +1119,8 @@ impl ImmutableRecord {
             payload: buf,
             values,
             recreating: false,
+            #[cfg(feature = "lazy_parsing")]
+            lazy_state: None,
         }
     }
 
@@ -1011,9 +1133,16 @@ impl ImmutableRecord {
         self.recreating = false;
     }
 
+    #[cfg(not(feature = "lazy_parsing"))]
     pub fn add_value(&mut self, value: RefValue) {
         assert!(self.recreating);
         self.values.push(value);
+    }
+    
+    #[cfg(feature = "lazy_parsing")]
+    pub fn add_value(&mut self, value: RefValue) {
+        assert!(self.recreating);
+        self.values.push(Some(value));
     }
 
     pub fn invalidate(&mut self) {
@@ -1028,22 +1157,100 @@ impl ImmutableRecord {
     pub fn get_payload(&self) -> &[u8] {
         &self.payload
     }
+
+    #[cfg(feature = "lazy_parsing")]
+    fn parse_column(&mut self, column: usize) -> Result<()> {
+        if let Some(ref mut lazy_state) = self.lazy_state {
+            // Check if already parsed
+            if lazy_state.parsed_mask.is_parsed(column) {
+                return Ok(());
+            }
+
+            // Get the serial type and offset for this column
+            let serial_type = lazy_state.serial_types[column];
+            let offset = lazy_state.column_offsets[column] as usize;
+            
+            // Parse the value from the payload
+            let buf = &self.payload[offset..];
+            let (value, _) = read_value(buf, SerialType(serial_type))?;
+            
+            // Store the parsed value
+            self.values[column] = Some(value);
+            
+            // Mark as parsed
+            lazy_state.parsed_mask.set_parsed(column);
+            
+            // Check if we should parse remaining columns
+            if lazy_state.parsed_mask.should_parse_remaining(lazy_state.column_count) {
+                self.parse_remaining_columns()?;
+            }
+            
+            Ok(())
+        } else {
+            Ok(()) // Not lazy parsing
+        }
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    fn parse_remaining_columns(&mut self) -> Result<()> {
+        // Collect unparsed columns first to avoid borrow conflict
+        let unparsed_columns: Vec<usize> = if let Some(ref lazy_state) = &self.lazy_state {
+            let column_count = lazy_state.column_count as usize;
+            (0..column_count)
+                .filter(|&i| !lazy_state.parsed_mask.is_parsed(i))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        
+        // Now parse them
+        for i in unparsed_columns {
+            self.parse_column(i)?;
+        }
+        Ok(())
+    }
 }
 
 impl Display for ImmutableRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for value in &self.values {
-            match value {
-                RefValue::Null => write!(f, "NULL")?,
-                RefValue::Integer(i) => write!(f, "Integer({})", *i)?,
-                RefValue::Float(flo) => write!(f, "Float({})", *flo)?,
-                RefValue::Text(text_ref) => write!(f, "Text({})", text_ref.as_str())?,
-                RefValue::Blob(raw_slice) => {
-                    write!(f, "Blob({})", String::from_utf8_lossy(raw_slice.to_slice()))?
+        #[cfg(not(feature = "lazy_parsing"))]
+        {
+            for value in &self.values {
+                match value {
+                    RefValue::Null => write!(f, "NULL")?,
+                    RefValue::Integer(i) => write!(f, "Integer({})", *i)?,
+                    RefValue::Float(flo) => write!(f, "Float({})", *flo)?,
+                    RefValue::Text(text_ref) => write!(f, "Text({})", text_ref.as_str())?,
+                    RefValue::Blob(raw_slice) => {
+                        write!(f, "Blob({})", String::from_utf8_lossy(raw_slice.to_slice()))?
+                    }
+                }
+                if value != self.values.last().unwrap() {
+                    write!(f, ", ")?;
                 }
             }
-            if value != self.values.last().unwrap() {
-                write!(f, ", ")?;
+        }
+        
+        #[cfg(feature = "lazy_parsing")]
+        {
+            for (i, value) in self.values.iter().enumerate() {
+                match value {
+                    Some(ref_value) => {
+                        match ref_value {
+                            RefValue::Null => write!(f, "NULL")?,
+                            RefValue::Integer(i) => write!(f, "Integer({})", *i)?,
+                            RefValue::Float(flo) => write!(f, "Float({})", *flo)?,
+                            RefValue::Text(text_ref) => write!(f, "Text({})", text_ref.as_str())?,
+                            RefValue::Blob(raw_slice) => {
+                                write!(f, "Blob({})", String::from_utf8_lossy(raw_slice.to_slice()))?
+                            }
+                        }
+                    }
+                    None => write!(f, "<unparsed>")?,
+                }
+                if i < self.values.len() - 1 {
+                    write!(f, ", ")?;
+                }
             }
         }
         Ok(())
@@ -1054,36 +1261,79 @@ impl Clone for ImmutableRecord {
     fn clone(&self) -> Self {
         let mut new_values = Vec::new();
         let new_payload = self.payload.clone();
-        for value in &self.values {
-            let value = match value {
-                RefValue::Null => RefValue::Null,
-                RefValue::Integer(i) => RefValue::Integer(*i),
-                RefValue::Float(f) => RefValue::Float(*f),
-                RefValue::Text(text_ref) => {
-                    // let's update pointer
-                    let ptr_start = self.payload.as_ptr() as usize;
-                    let ptr_end = text_ref.value.data as usize;
-                    let len = ptr_end - ptr_start;
-                    let new_ptr = unsafe { new_payload.as_ptr().add(len) };
-                    RefValue::Text(TextRef {
-                        value: RawSlice::new(new_ptr, text_ref.value.len),
-                        subtype: text_ref.subtype.clone(),
-                    })
-                }
-                RefValue::Blob(raw_slice) => {
-                    let ptr_start = self.payload.as_ptr() as usize;
-                    let ptr_end = raw_slice.data as usize;
-                    let len = ptr_end - ptr_start;
-                    let new_ptr = unsafe { new_payload.as_ptr().add(len) };
-                    RefValue::Blob(RawSlice::new(new_ptr, raw_slice.len))
-                }
-            };
-            new_values.push(value);
+        
+        #[cfg(not(feature = "lazy_parsing"))]
+        {
+            for value in &self.values {
+                let value = match value {
+                    RefValue::Null => RefValue::Null,
+                    RefValue::Integer(i) => RefValue::Integer(*i),
+                    RefValue::Float(f) => RefValue::Float(*f),
+                    RefValue::Text(text_ref) => {
+                        // let's update pointer
+                        let ptr_start = self.payload.as_ptr() as usize;
+                        let ptr_end = text_ref.value.data as usize;
+                        let len = ptr_end - ptr_start;
+                        let new_ptr = unsafe { new_payload.as_ptr().add(len) };
+                        RefValue::Text(TextRef {
+                            value: RawSlice::new(new_ptr, text_ref.value.len),
+                            subtype: text_ref.subtype.clone(),
+                        })
+                    }
+                    RefValue::Blob(raw_slice) => {
+                        let ptr_start = self.payload.as_ptr() as usize;
+                        let ptr_end = raw_slice.data as usize;
+                        let len = ptr_end - ptr_start;
+                        let new_ptr = unsafe { new_payload.as_ptr().add(len) };
+                        RefValue::Blob(RawSlice::new(new_ptr, raw_slice.len))
+                    }
+                };
+                new_values.push(value);
+            }
         }
+        
+        #[cfg(feature = "lazy_parsing")]
+        {
+            for value in &self.values {
+                let value = match value {
+                    Some(ref_value) => {
+                        let cloned = match ref_value {
+                            RefValue::Null => RefValue::Null,
+                            RefValue::Integer(i) => RefValue::Integer(*i),
+                            RefValue::Float(f) => RefValue::Float(*f),
+                            RefValue::Text(text_ref) => {
+                                // let's update pointer
+                                let ptr_start = self.payload.as_ptr() as usize;
+                                let ptr_end = text_ref.value.data as usize;
+                                let len = ptr_end - ptr_start;
+                                let new_ptr = unsafe { new_payload.as_ptr().add(len) };
+                                RefValue::Text(TextRef {
+                                    value: RawSlice::new(new_ptr, text_ref.value.len),
+                                    subtype: text_ref.subtype.clone(),
+                                })
+                            }
+                            RefValue::Blob(raw_slice) => {
+                                let ptr_start = self.payload.as_ptr() as usize;
+                                let ptr_end = raw_slice.data as usize;
+                                let len = ptr_end - ptr_start;
+                                let new_ptr = unsafe { new_payload.as_ptr().add(len) };
+                                RefValue::Blob(RawSlice::new(new_ptr, raw_slice.len))
+                            }
+                        };
+                        Some(cloned)
+                    }
+                    None => None,
+                };
+                new_values.push(value);
+            }
+        }
+        
         Self {
             payload: new_payload,
             values: new_values,
             recreating: self.recreating,
+            #[cfg(feature = "lazy_parsing")]
+            lazy_state: self.lazy_state.clone(),
         }
     }
 }
@@ -1897,5 +2147,161 @@ mod tests {
             buf.len(),
             header_length + size_of::<i8>() + size_of::<f64>() + text.len()
         );
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_lazy_record_parsing() {
+        // Create a simple record with 3 values
+        let record = Record::new(vec![
+            Value::Integer(42),
+            Value::Text(Text::from("hello".to_string())),
+            Value::Null,
+        ]);
+        
+        // Serialize it
+        let mut payload = Vec::new();
+        record.serialize(&mut payload);
+        
+        // Parse the header
+        let lazy_state = crate::storage::sqlite3_ondisk::parse_record_header(&payload).unwrap();
+        
+        // Create lazy record
+        let mut lazy_record = ImmutableRecord::new_lazy(payload, lazy_state);
+        
+        // Initially, no columns should be parsed
+        assert!(lazy_record.values[0].is_none());
+        assert!(lazy_record.values[1].is_none());
+        assert!(lazy_record.values[2].is_none());
+        
+        // Access first column
+        let val = lazy_record.get_value_opt(0).unwrap();
+        assert!(val.is_some());
+        match val.unwrap() {
+            RefValue::Integer(i) => assert_eq!(i, 42),
+            _ => panic!("Expected integer"),
+        }
+        
+        // First column should now be parsed, others not
+        assert!(lazy_record.values[0].is_some());
+        assert!(lazy_record.values[1].is_none());
+        assert!(lazy_record.values[2].is_none());
+        
+        // Access second column
+        let val = lazy_record.get_value_opt(1).unwrap();
+        assert!(val.is_some());
+        match val.unwrap() {
+            RefValue::Text(t) => assert_eq!(t.as_str(), "hello"),
+            _ => panic!("Expected text"),
+        }
+        
+        // All columns should now be parsed because we accessed 2/3 columns (>50%)
+        assert!(lazy_record.values[0].is_some());
+        assert!(lazy_record.values[1].is_some());
+        assert!(lazy_record.values[2].is_some());
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_lazy_parsing_50_percent_heuristic() {
+        // Create a record with 5 values
+        let record = Record::new(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3),
+            Value::Integer(4),
+            Value::Integer(5),
+        ]);
+        
+        // Serialize it
+        let mut payload = Vec::new();
+        record.serialize(&mut payload);
+        
+        // Parse the header
+        let lazy_state = crate::storage::sqlite3_ondisk::parse_record_header(&payload).unwrap();
+        
+        // Create lazy record
+        let mut lazy_record = ImmutableRecord::new_lazy(payload, lazy_state);
+        
+        // Access first column
+        lazy_record.get_value_opt(0).unwrap();
+        assert!(lazy_record.values[0].is_some());
+        assert!(lazy_record.values[4].is_none()); // Last column not parsed
+        
+        // Access second column
+        lazy_record.get_value_opt(1).unwrap();
+        assert!(lazy_record.values[1].is_some());
+        assert!(lazy_record.values[4].is_none()); // Still not parsed
+        
+        // Access third column - this should trigger parsing all remaining
+        // because we've accessed >50% of columns (3 out of 5)
+        lazy_record.get_value_opt(2).unwrap();
+        
+        // All columns should now be parsed
+        for i in 0..5 {
+            assert!(lazy_record.values[i].is_some());
+        }
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_parsed_mask_small() {
+        let mut mask = ParsedMask::new(10);
+        
+        // Initially nothing is parsed
+        assert!(!mask.is_parsed(0));
+        assert!(!mask.is_parsed(9));
+        
+        // Mark some as parsed
+        mask.set_parsed(0);
+        mask.set_parsed(5);
+        mask.set_parsed(9);
+        
+        assert!(mask.is_parsed(0));
+        assert!(!mask.is_parsed(1));
+        assert!(mask.is_parsed(5));
+        assert!(mask.is_parsed(9));
+        
+        // Count parsed
+        assert_eq!(mask.parsed_count(), 3);
+        
+        // Should not parse remaining yet (3 out of 10 = 30%)
+        assert!(!mask.should_parse_remaining(10));
+        
+        // Mark more columns
+        mask.set_parsed(3);
+        mask.set_parsed(7);
+        mask.set_parsed(8);
+        
+        // Now 6 out of 10 = 60%, should parse remaining
+        assert!(mask.should_parse_remaining(10));
+    }
+
+    #[cfg(feature = "lazy_parsing")]
+    #[test]
+    fn test_parsed_mask_large() {
+        let mut mask = ParsedMask::new(100);
+        
+        // Mark columns across multiple u64 chunks
+        mask.set_parsed(0);
+        mask.set_parsed(63);
+        mask.set_parsed(64);
+        mask.set_parsed(99);
+        
+        assert!(mask.is_parsed(0));
+        assert!(mask.is_parsed(63));
+        assert!(mask.is_parsed(64));
+        assert!(mask.is_parsed(99));
+        assert!(!mask.is_parsed(50));
+        
+        assert_eq!(mask.parsed_count(), 4);
+        
+        // Parse many more to trigger the heuristic
+        for i in 0..55 {
+            mask.set_parsed(i);
+        }
+        
+        // Now 55 out of 100 = 55%, should parse remaining
+        assert!(mask.should_parse_remaining(100));
     }
 }
