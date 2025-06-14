@@ -18,6 +18,7 @@ use crate::vdbe::Register;
 use crate::vtab::VirtualTableCursor;
 use crate::Result;
 use std::fmt::Display;
+#[cfg(feature = "lazy_parsing")]
 use std::sync::Arc;
 
 const MAX_REAL_SIZE: u8 = 15;
@@ -1258,6 +1259,25 @@ impl ImmutableRecord {
         }
         Ok(())
     }
+
+    #[cfg(feature = "lazy_parsing")]
+    pub fn get_column_lazy(&mut self, column: usize) -> Result<&RefValue> {
+        // Parse the column if needed
+        self.parse_column(column)?;
+        
+        // Return the parsed value
+        self.values
+            .get(column)
+            .and_then(|opt| opt.as_ref())
+            .ok_or_else(|| LimboError::InternalError(format!("Column {} not found", column)))
+    }
+
+    #[cfg(not(feature = "lazy_parsing"))]
+    pub fn get_column_lazy(&self, column: usize) -> Result<&RefValue> {
+        self.values
+            .get(column)
+            .ok_or_else(|| LimboError::InternalError(format!("Column {} not found", column)))
+    }
 }
 
 impl Display for ImmutableRecord {
@@ -1308,12 +1328,11 @@ impl Display for ImmutableRecord {
 
 impl Clone for ImmutableRecord {
     fn clone(&self) -> Self {
-        #[allow(unused_mut)]
-        let mut new_values = Vec::new();
         let new_payload = self.payload.clone();
         
         #[cfg(not(feature = "lazy_parsing"))]
-        {
+        let mut new_values = {
+            let mut new_values = Vec::new();
             for value in &self.values {
                 let value = match value {
                     RefValue::Null => RefValue::Null,
@@ -1346,13 +1365,14 @@ impl Clone for ImmutableRecord {
                 };
                 new_values.push(value);
             }
-        }
+            new_values
+        };
         
         #[cfg(feature = "lazy_parsing")]
-        {
+        let new_values = {
             // With Arc, cloned Arc points to same memory, so pointers remain valid
-            new_values = self.values.clone();
-        }
+            self.values.clone()
+        };
         
         Self {
             payload: new_payload,

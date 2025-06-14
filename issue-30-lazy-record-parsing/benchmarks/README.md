@@ -65,6 +65,11 @@ For detailed instructions, run: `./run_benchmarks.sh`
    - Filter and project (WHERE + SELECT few columns)
    - GROUP BY with aggregations
 
+4. **ORDER BY Tests** - Measure sorting performance with lazy parsing:
+   - Selective column retrieval with ORDER BY (benefits from lazy parsing)
+   - SELECT * with ORDER BY (tests overhead)
+   - Multi-key ORDER BY (tests multiple column parsing for sort keys)
+
 ### Test Configuration
 
 - **Dataset Size**: 100,000 rows per table

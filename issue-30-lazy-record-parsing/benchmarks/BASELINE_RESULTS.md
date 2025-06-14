@@ -140,3 +140,12 @@ Based on these measurements, lazy record parsing should provide:
 2. Re-run benchmarks: `./run_benchmarks.sh --compare-baseline pre-lazy-parsing`
 3. Verify improvements meet targets
 4. Profile any remaining bottlenecks with flamegraphs
+
+## Note on ORDER BY Benchmarks
+
+ORDER BY benchmarks were added to the suite on June 14, 2025, after the initial baseline measurements. These benchmarks test:
+- Selective column retrieval with ORDER BY
+- Full SELECT * with ORDER BY
+- Multi-key ORDER BY scenarios
+
+These were added specifically to measure the impact of the sorter optimization that was implemented as part of Fix #3.

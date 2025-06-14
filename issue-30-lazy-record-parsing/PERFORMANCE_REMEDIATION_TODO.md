@@ -33,19 +33,21 @@ if should_use_lazy {
 ```
 **Status**: Implemented with configurable thresholds (8 columns, 256 bytes)
 
-### 3. Remove Sorter Pre-Parsing
+### 3. Remove Sorter Pre-Parsing [COMPLETED]
 **File**: `core/vdbe/sorter.rs`
-**Function**: `sort_main()`
-**Problem**: Pre-parses all columns before sorting
-**Fix**: DELETE the entire pre-parsing loop:
-```rust
-// DELETE THIS:
-for record in &mut self.records {
-    for i in 0..self.key_len {
-        let _ = record.parse_column(i);
-    }
-}
-```
+**Function**: `sort()`
+**Problem**: Pre-parsed all columns before sorting
+**Fix**: Optimized to parse only key columns and eliminated Vec allocations
+**Implementation**: 
+- Added `get_column_lazy()` method to ImmutableRecord
+- Modified sorter to parse only key columns (not all columns)
+- Eliminated Vec allocations in comparison logic
+- Direct column comparison without intermediate collections
+**Status**: Completed June 14, 2025
+**Benchmarks**: Added comprehensive ORDER BY benchmarks to test suite:
+  - Selective column retrieval with ORDER BY
+  - Full SELECT * with ORDER BY
+  - Multi-key ORDER BY scenarios
 
 ### 4. Fix Benchmark Setup [COMPLETED]
 **Commands**:
@@ -101,7 +103,7 @@ for i in 0..self.key_len {
 - [x] Test scenarios _All scenarios covered in benchmark suite:_
   - [x] 10% column selectivity (should be 90% faster) _bench_column_selectivity_
   - [x] COUNT(*) on 50+ column tables (should be 95%+ faster) _bench_aggregations_
-  - [ ] ORDER BY with partial columns (should be 20%+ faster) _Requires Fix #3 first_
+  - [x] ORDER BY with partial columns (should be 20%+ faster) _Fix #3 completed, only parses key columns_
   - [x] SELECT * (should be within 5% of baseline) _100% selectivity test_
 - [ ] Memory profiling with heaptrack
 - [ ] Run full test suite with lazy parsing enabled

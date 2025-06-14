@@ -373,6 +373,107 @@ fn bench_real_world_patterns(c: &mut Criterion) {
     }
 }
 
+fn bench_order_by(c: &mut Criterion) {
+    let enable_rusqlite = std::env::var("DISABLE_RUSQLITE_BENCHMARK").is_err();
+    
+    for &num_columns in TABLE_WIDTHS {
+        let (_temp_dir, db_path) = setup_wide_table_database(num_columns);
+        
+        // Test 1: ORDER BY with selective column retrieval
+        // This tests lazy parsing benefits when sorting but only retrieving a few columns
+        let selective_query = format!(
+            "SELECT col_0, col_1, col_2 FROM wide_table ORDER BY col_{} LIMIT 100",
+            num_columns / 2
+        );
+        
+        let bench_name = format!("order_by_selective_{}_cols", num_columns);
+        benchmark_query(&bench_name, c, &db_path, &selective_query, enable_rusqlite);
+        
+        // Test 2: ORDER BY with all columns
+        // This tests the overhead of lazy parsing when we need all columns anyway
+        let all_cols_query = "SELECT * FROM wide_table ORDER BY col_0 LIMIT 100";
+        let bench_name = format!("order_by_all_{}_cols", num_columns);
+        benchmark_query(&bench_name, c, &db_path, &all_cols_query, enable_rusqlite);
+        
+        // Test 3: ORDER BY with multiple sort keys
+        // This tests lazy parsing when we need to parse multiple columns for sorting
+        let multi_key_query = format!(
+            "SELECT col_0, col_1 FROM wide_table ORDER BY col_{}, col_{} DESC LIMIT 100",
+            num_columns / 3,
+            num_columns / 2
+        );
+        let bench_name = format!("order_by_multi_key_{}_cols", num_columns);
+        benchmark_query(&bench_name, c, &db_path, &multi_key_query, enable_rusqlite);
+    }
+}
+
+// Helper function to reduce code duplication
+fn benchmark_query(bench_name: &str, c: &mut Criterion, db_path: &str, query: &str, enable_rusqlite: bool) {
+    let mut group = c.benchmark_group(format!("ORDER BY: {}", bench_name));
+    
+    // Benchmark Limbo
+    #[allow(clippy::arc_with_non_send_sync)]
+    let io = Arc::new(PlatformIO::new().unwrap());
+    let db = Database::open_file(io.clone(), &db_path, false).unwrap();
+    let limbo_conn = db.connect().unwrap();
+    
+    group.bench_with_input(
+        BenchmarkId::new("limbo", bench_name),
+        query,
+        |b, query| {
+            b.iter(|| {
+                let mut stmt = limbo_conn.prepare(query).unwrap();
+                let io = io.clone();
+                let mut count = 0;
+                loop {
+                    match stmt.step().unwrap() {
+                        StepResult::Row => {
+                            black_box(stmt.row());
+                            count += 1;
+                        }
+                        StepResult::IO => {
+                            let _ = io.run_once();
+                        }
+                        StepResult::Done => {
+                            break;
+                        }
+                        StepResult::Interrupt | StepResult::Busy => {
+                            unreachable!();
+                        }
+                    }
+                }
+                stmt.reset();
+                black_box(count);
+            });
+        },
+    );
+    
+    // Benchmark rusqlite
+    if enable_rusqlite {
+        let sqlite_conn = rusqlite::Connection::open(db_path).unwrap();
+        sqlite_conn.pragma_update(None, "locking_mode", "EXCLUSIVE").unwrap();
+        
+        group.bench_with_input(
+            BenchmarkId::new("rusqlite", bench_name),
+            query,
+            |b, query| {
+                b.iter(|| {
+                    let mut stmt = sqlite_conn.prepare(query).unwrap();
+                    let mut rows = stmt.query([]).unwrap();
+                    let mut count = 0;
+                    while let Some(row) = rows.next().unwrap() {
+                        let _ = black_box(row);
+                        count += 1;
+                    }
+                    black_box(count);
+                });
+            },
+        );
+    }
+    
+    group.finish();
+}
+
 // Configure criterion with profiler support
 fn criterion_config() -> Criterion {
     Criterion::default()
@@ -382,7 +483,7 @@ fn criterion_config() -> Criterion {
 criterion_group! {
     name = benches;
     config = criterion_config();
-    targets = bench_column_selectivity, bench_aggregations, bench_real_world_patterns
+    targets = bench_column_selectivity, bench_aggregations, bench_real_world_patterns, bench_order_by
 }
 
 criterion_main!(benches);
