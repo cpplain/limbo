@@ -41,7 +41,7 @@ Time per query in microseconds (µs) for queries returning ~1000 rows:
 | 10% | 5 of 50 | 8.5µs | 2.5µs | 3.4x | Parsing 45 unnecessary columns |
 | 25% | 12 of 50 | 12.3µs | 4.6µs | 2.7x | Parsing 38 unnecessary columns |
 | 50% | 25 of 50 | 17.0µs | 8.8µs | 1.9x | Parsing 25 unnecessary columns |
-| 100% | All 50 | 16.3µs | 18.4µs | 0.9x ✓ | Limbo faster! |
+| 100% | All 50 | 16.3µs | 18.4µs | 0.9x | Limbo faster! |
 
 #### 100-Column Tables
 | Selectivity | Columns Selected | Limbo | SQLite | Overhead | Analysis |
@@ -49,7 +49,7 @@ Time per query in microseconds (µs) for queries returning ~1000 rows:
 | 10% | 10 of 100 | 14.0µs | 4.3µs | 3.3x | Parsing 90 unnecessary columns |
 | 25% | 25 of 100 | 19.5µs | 8.7µs | 2.2x | Parsing 75 unnecessary columns |
 | 50% | 50 of 100 | 30.5µs | 20.2µs | 1.5x | Parsing 50 unnecessary columns |
-| 100% | All 100 | 27.0µs | 40.8µs | 0.7x ✓ | Limbo 30% faster! |
+| 100% | All 100 | 27.0µs | 40.8µs | 0.7x | Limbo 30% faster! |
 
 ### Aggregation Performance
 

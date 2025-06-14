@@ -2,7 +2,7 @@
 
 Date: December 6, 2025
 
-## Everything is Now Self-Contained ✓
+## Everything is Now Self-Contained
 
 All lazy record parsing benchmark materials are now contained within `issue-30-lazy-record-parsing/`:
 

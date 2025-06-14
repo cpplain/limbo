@@ -112,9 +112,9 @@ Based on the data, recommended thresholds for enabling lazy parsing:
 
 For the implementation to be considered successful:
 
-- ✅ >80% improvement for 10% column selectivity on 50+ column tables
-- ✅ <10% regression for SELECT \* queries
-- ✅ >85% improvement for single-column aggregations on wide tables
+- >80% improvement for 10% column selectivity on 50+ column tables
+- <10% regression for SELECT * queries
+- >85% improvement for single-column aggregations on wide tables
 
 ## Methodology Notes
 
