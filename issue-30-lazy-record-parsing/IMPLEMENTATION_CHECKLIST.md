@@ -10,7 +10,7 @@ The lazy record parsing implementation is now functionally complete with compreh
 
 ## Pre-Implementation
 - [ ] Create feature branch `feature/lazy-record-parsing`
-- [x] Add `lazy_parsing` feature flag to `Cargo.toml` (2025-12-06)
+- [x] Add `lazy_parsing` feature flag to `Cargo.toml` (2025-06-13)
 - [x] Set up baseline benchmarks and save results
 - [ ] Review this checklist with the team
 
@@ -38,11 +38,11 @@ The lazy record parsing implementation is now functionally complete with compreh
 
 ## Week 2-3: Core Implementation
 ### ImmutableRecord Changes
-- [x] Change `values` from `Vec<RefValue>` to `Vec<Option<RefValue>>` (2025-12-06)
-- [x] Add `lazy_state: Option<LazyParseState>` field (2025-12-06)
-- [x] Update `get_value_opt()` method (2025-12-06)
+- [x] Change `values` from `Vec<RefValue>` to `Vec<Option<RefValue>>` (2025-06-13)
+- [x] Add `lazy_state: Option<LazyParseState>` field (2025-06-13)
+- [x] Update `get_value_opt()` method (2025-06-13)
 - [x] Implement `get_value_lazy()` method (implemented as `parse_column()`)
-- [x] Add `parse_column()` private method (2025-12-06)
+- [x] Add `parse_column()` private method (2025-06-13)
 - [x] Implement >50% heuristic in `parse_column()`
 - [x] Fix borrow checker issues in `parse_remaining_columns()`
 - [x] Update Clone implementation for lazy state
@@ -84,7 +84,7 @@ The lazy record parsing implementation is now functionally complete with compreh
 
 ## Week 4: Testing & Optimization
 ### Correctness Testing
-- [x] Unit tests for lazy vs eager equivalence (2025-12-06)
+- [x] Unit tests for lazy vs eager equivalence (2025-06-13)
   - [x] test_lazy_record_parsing
   - [x] test_lazy_parsing_50_percent_heuristic
   - [x] test_parsed_mask_small
