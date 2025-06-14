@@ -31,6 +31,9 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "lazy_parsing")]
+use std::cell::RefMut;
+
 use super::{
     pager::PageRef,
     sqlite3_ondisk::{
@@ -4228,6 +4231,76 @@ impl BTreeCursor {
         *self.parse_record_state.borrow_mut() = ParseRecordState::Init;
         let record_ref =
             Ref::filter_map(self.reusable_immutable_record.borrow(), |opt| opt.as_ref()).unwrap();
+        Ok(CursorResult::Ok(Some(record_ref)))
+    }
+
+    /// Get a mutable reference to the current record for lazy parsing.
+    /// This method is similar to record() but returns a mutable reference.
+    #[cfg(feature = "lazy_parsing")]
+    pub fn record_mut(&self) -> Result<CursorResult<Option<RefMut<ImmutableRecord>>>> {
+        if !self.has_record.get() {
+            return Ok(CursorResult::Ok(None));
+        }
+        let invalidated = self
+            .reusable_immutable_record
+            .borrow()
+            .as_ref()
+            .map_or(true, |record| record.is_invalidated());
+        if !invalidated {
+            *self.parse_record_state.borrow_mut() = ParseRecordState::Init;
+            let record_ref =
+                RefMut::filter_map(self.reusable_immutable_record.borrow_mut(), |opt| opt.as_mut())
+                    .unwrap();
+            return Ok(CursorResult::Ok(Some(record_ref)));
+        }
+        if *self.parse_record_state.borrow() == ParseRecordState::Init {
+            *self.parse_record_state.borrow_mut() = ParseRecordState::Parsing {
+                payload: Vec::new(),
+            };
+        }
+        let page = self.stack.top();
+        return_if_locked_maybe_load!(self.pager, page);
+        let page = page.get();
+        let contents = page.get_contents();
+        let cell_idx = self.stack.current_cell_index();
+        let cell = contents.cell_get(
+            cell_idx as usize,
+            payload_overflow_threshold_max(contents.page_type(), self.usable_space() as u16),
+            payload_overflow_threshold_min(contents.page_type(), self.usable_space() as u16),
+            self.usable_space(),
+        )?;
+        let (payload, payload_size, first_overflow_page) = match cell {
+            BTreeCell::TableLeafCell(TableLeafCell {
+                _rowid,
+                _payload,
+                payload_size,
+                first_overflow_page,
+            }) => (_payload, payload_size, first_overflow_page),
+            BTreeCell::IndexInteriorCell(IndexInteriorCell {
+                left_child_page: _,
+                payload,
+                payload_size,
+                first_overflow_page,
+            }) => (payload, payload_size, first_overflow_page),
+            BTreeCell::IndexLeafCell(IndexLeafCell {
+                payload,
+                first_overflow_page,
+                payload_size,
+            }) => (payload, payload_size, first_overflow_page),
+            _ => unreachable!("unexpected page_type"),
+        };
+        if let Some(next_page) = first_overflow_page {
+            return_if_io!(self.process_overflow_read(payload, next_page, payload_size))
+        } else {
+            crate::storage::sqlite3_ondisk::read_record(
+                payload,
+                self.get_immutable_record_or_create().as_mut().unwrap(),
+            )?
+        };
+
+        *self.parse_record_state.borrow_mut() = ParseRecordState::Init;
+        let record_ref =
+            RefMut::filter_map(self.reusable_immutable_record.borrow_mut(), |opt| opt.as_mut()).unwrap();
         Ok(CursorResult::Ok(Some(record_ref)))
     }
 

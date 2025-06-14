@@ -1407,9 +1407,27 @@ pub fn op_column(
             
             #[cfg(feature = "lazy_parsing")]
             let value = {
-                // For lazy parsing, we need to handle the Result type properly
-                // This is a temporary workaround - ideally we'd have record_mut()
-                RefValue::Null // TODO: Implement proper lazy parsing support in op_column
+                let mut cursor =
+                    must_be_btree_cursor!(*cursor_id, program.cursor_ref, state, "Column");
+                let cursor = cursor.as_btree_mut();
+                
+                // Use record_mut() to get mutable access for lazy parsing
+                let record = return_if_io!(cursor.record_mut());
+                
+                if let Some(mut record) = record {
+                    if cursor.get_null_flag() {
+                        RefValue::Null
+                    } else {
+                        // This will trigger lazy parsing if needed
+                        match record.get_value_opt(*column) {
+                            Ok(Some(val)) => val.clone(),
+                            Ok(None) => RefValue::Null,
+                            Err(_) => RefValue::Null,
+                        }
+                    }
+                } else {
+                    RefValue::Null
+                }
             };
             // If we are copying a text/blob, let's try to simply update size of text if we need to allocate more and reuse.
             match (&value, &mut state.registers[*dest]) {
