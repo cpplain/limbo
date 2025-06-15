@@ -41,22 +41,20 @@ impl Sorter {
     pub fn sort(&mut self) {
         #[cfg(feature = "lazy_parsing")]
         {
-            // For lazy parsing, we need to ensure key columns are parsed before sorting
-            // This is more efficient than parsing during each comparison
-            // Only parse the key columns, not all columns
+            // For lazy parsing, we need to pre-parse sort keys to enable comparison
+            // This is a necessary trade-off since Rust's sort_by doesn't allow mutation
             for record in &mut self.records {
                 for i in 0..self.key_len {
-                    let _ = record.parse_column(i); // Ignore errors
+                    let _ = record.parse_column(i); // Parse only sort keys
                 }
             }
             
-            // Now sort using the standard algorithm
+            // Now sort using standard comparison
             self.records.sort_by(|a, b| {
                 use std::cmp::Ordering;
                 
-                // Compare key columns without allocating Vecs
+                // Compare pre-parsed key columns
                 for i in 0..self.key_len {
-                    // Access already-parsed values directly
                     let val_a = a.values.get(i).and_then(|opt| opt.as_ref());
                     let val_b = b.values.get(i).and_then(|opt| opt.as_ref());
                     
